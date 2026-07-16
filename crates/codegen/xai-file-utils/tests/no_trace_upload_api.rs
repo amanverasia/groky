@@ -52,9 +52,11 @@ fn crate_source_has_no_trace_upload_api() {
     ];
     for file in files {
         let path = crate_root().join("src").join(file);
-        if !path.exists() {
-            continue;
-        }
+        assert!(
+            path.exists(),
+            "scanned source file missing (rename breaks this guard): {}",
+            path.display()
+        );
         assert_forbidden(&path, &forbidden);
     }
 }

@@ -5,7 +5,6 @@ name = "xai-tracing"
 version = "0.1.0"
 
 [dependencies]
-http = { workspace = true }
 log = { workspace = true }
 fastrace = { workspace = true }
 tokio = { workspace = true }

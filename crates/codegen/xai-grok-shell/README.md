@@ -1320,18 +1320,7 @@ confirm_quit = true
 
 ### Telemetry
 
-Configure telemetry destinations and credentials. Empty values disable the corresponding sink. Env vars take precedence over config values. Builds from the public source tree carry no telemetry defaults: `events_url`, `events_api_key`, and `mixpanel_token` are unset and `mixpanel_enabled` is `false`, so nothing is sent unless you supply values here or via env.
-
-```toml
-[telemetry]
-events_url = "https://example.com/events"  # env: GROK_TELEMETRY_EVENTS_URL
-events_api_key = "..."                      # env: GROK_TELEMETRY_EVENTS_API_KEY
-mixpanel_token = "..."                      # env: GROK_TELEMETRY_MIXPANEL_TOKEN
-mixpanel_enabled = true                     # env: GROK_TELEMETRY_MIXPANEL_ENABLED
-trace_upload = true                         # env: GROK_TELEMETRY_TRACE_UPLOAD
-```
-
-When building from source, defaults can also be baked into the binary at compile time by setting `GROK_TELEMETRY_BUILD_EVENTS_URL`, `GROK_TELEMETRY_BUILD_EVENTS_API_KEY`, and `GROK_TELEMETRY_BUILD_MIXPANEL_TOKEN` in the build environment (providing a Mixpanel token this way also enables Mixpanel by default). Config-file and runtime env values override build-time defaults.
+Builds from this source tree perform no network telemetry: there are no event, analytics, or trace-upload sinks, and no `[telemetry]` destination or credential config. The `[features] telemetry` toggle only governs local diagnostics.
 
 ### LSP Servers
 

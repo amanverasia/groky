@@ -13799,7 +13799,6 @@ name = "xai-tracing"
 version = "0.1.0"
 dependencies = [
  "fastrace",
- "http 1.4.0",
  "log",
  "tokio",
  "tracing",

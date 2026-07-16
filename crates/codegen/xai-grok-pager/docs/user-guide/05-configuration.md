@@ -546,17 +546,7 @@ See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the complete reference.
 
 ### Telemetry
 
-The `[features] telemetry` toggle (in the `[features]` block above) is the master switch for anonymous usage telemetry. When telemetry is enabled, enterprises that run their own collector can redirect it or selectively disable parts of it under `[telemetry]`:
-
-```toml
-[telemetry]
-events_url = "https://telemetry.your-company.com/events"  # send events to your own collector
-events_api_key = "your-collector-token"                   # auth for your collector, if required
-mixpanel_enabled = false                                  # disable Mixpanel product analytics
-trace_upload = false                                      # disable session/trace uploads (inherits the telemetry toggle when unset)
-```
-
-Set these only to point telemetry at your own infrastructure or to turn parts of it off. The built-in endpoint and credentials are managed by Grok; leave them unset to use the defaults.
+Grok performs no network telemetry. The `[features] telemetry` toggle (in the `[features]` block above) is retained for config compatibility but only governs local diagnostics; there is no `[telemetry]` destination config.
 
 ### Enterprise Deployment
 
