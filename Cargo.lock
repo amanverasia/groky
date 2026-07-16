@@ -12543,6 +12543,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "xai-grok-compaction"
 version = "0.1.0"
 dependencies = [

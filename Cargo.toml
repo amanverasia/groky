@@ -18,6 +18,7 @@ members = [
     "crates/codegen/xai-grok-agent",
     "crates/codegen/xai-grok-announcements",
     "crates/codegen/xai-grok-auth",
+    "crates/codegen/xai-grok-catalog",
     "crates/codegen/xai-grok-config",
     "crates/codegen/xai-grok-config-types",
     "crates/codegen/xai-grok-env",
@@ -269,6 +270,7 @@ xai-gix-status = { path = "crates/codegen/xai-gix-status" }
 xai-grok-agent = { path = "crates/codegen/xai-grok-agent" }
 xai-grok-announcements = { path = "crates/codegen/xai-grok-announcements" }
 xai-grok-auth = { path = "crates/codegen/xai-grok-auth" }
+xai-grok-catalog = { path = "crates/codegen/xai-grok-catalog" }
 xai-grok-config = { path = "crates/codegen/xai-grok-config" }
 xai-grok-config-types = { path = "crates/codegen/xai-grok-config-types" }
 xai-grok-env = { path = "crates/codegen/xai-grok-env" }
