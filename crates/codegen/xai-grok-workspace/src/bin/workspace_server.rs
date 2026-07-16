@@ -220,21 +220,6 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .with(donating.clone())
         .init();
-    let direct_otlp = match std::env::var("GROK_WORKSPACE_OTLP_ENDPOINT") {
-        Ok(endpoint) if !endpoint.is_empty() => {
-            match xai_tracing::init_fastrace(endpoint.clone(), SERVICE_NAME.to_owned(), None) {
-                Ok(()) => {
-                    tracing::info!(% endpoint, "trace export enabled (direct OTLP)");
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!(error = % e, "direct OTLP trace export init failed");
-                    false
-                }
-            }
-        }
-        _ => false,
-    };
     let url = Url::parse(&args.hub_url).map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))?;
     {
         use xai_grok_sandbox::{ProfileName, SandboxManager};
@@ -370,15 +355,13 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         ));
     }
     let mut donation_pump = None;
-    if !direct_otlp {
-        match ws_handle.trace_donation_reporter(SERVICE_NAME).await {
-            Some((reporter, pump)) => {
-                fastrace::set_reporter(reporter, fastrace::collector::Config::default());
-                donation_pump = Some(pump);
-                tracing::info!("trace export enabled");
-            }
-            None => tracing::info!("trace export disabled (not connected)"),
+    match ws_handle.trace_donation_reporter(SERVICE_NAME).await {
+        Some((reporter, pump)) => {
+            fastrace::set_reporter(reporter, fastrace::collector::Config::default());
+            donation_pump = Some(pump);
+            tracing::info!("trace export enabled");
         }
+        None => tracing::info!("trace export disabled (not connected)"),
     }
     let mut log_donation_pump = None;
     match ws_handle.log_donation_layer(SERVICE_NAME).await {
