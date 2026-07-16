@@ -163,14 +163,21 @@ fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn pager_tracing_source_installs_local_diagnostic_layers() {
     let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tracing.rs"));
+    // Only scan production code: truncate at the unit-test module so string
+    // literals inside `src/tracing.rs`'s own tests can never satisfy this
+    // guard. Match fully-qualified call sites for the same reason.
+    let production = source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
     for required in [
-        "instrumentation::layer()",
-        "sampling_log::layer()",
-        "hooks_log::layer()",
-        "debug_log::install_firehose",
+        "xai_grok_telemetry::instrumentation::layer()",
+        "xai_grok_telemetry::sampling_log::layer()",
+        "xai_grok_telemetry::hooks_log::layer()",
+        "xai_grok_telemetry::debug_log::install_firehose(",
     ] {
         assert!(
-            source.contains(required),
+            production.contains(required),
             "local tracing layer missing from pager tracing bootstrap: {required}"
         );
     }

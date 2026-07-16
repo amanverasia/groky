@@ -903,14 +903,21 @@ mod tests {
                 "remote tracing hook survived: {forbidden}"
             );
         }
+        // Positive markers scan only production code (truncated at the test
+        // module) and use fully-qualified call sites, so literals in this
+        // test cannot satisfy the assertions themselves.
+        let production = source
+            .split(concat!("#[cfg", "(test)]"))
+            .next()
+            .expect("split always yields at least one segment");
         for required in [
-            "instrumentation::layer()",
-            "sampling_log::layer()",
-            "hooks_log::layer()",
-            "debug_log::install_firehose",
+            "xai_grok_telemetry::instrumentation::layer()",
+            "xai_grok_telemetry::sampling_log::layer()",
+            "xai_grok_telemetry::hooks_log::layer()",
+            "xai_grok_telemetry::debug_log::install_firehose(",
         ] {
             assert!(
-                source.contains(required),
+                production.contains(required),
                 "local tracing layer missing: {required}"
             );
         }
