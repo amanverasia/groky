@@ -7034,8 +7034,11 @@ reasoning_effort = "low"
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));
     }
+    /// NEW CONTRACT: legacy `[telemetry]` network fields still parse without
+    /// error but the resulting config has no network sink fields and telemetry
+    /// stays disabled.
     #[test]
-    fn telemetry_config_parses_custom_values_from_toml() {
+    fn telemetry_legacy_network_fields_parse_and_stay_disabled() {
         let raw: toml::Value = toml::from_str(
             r#"
             [telemetry]
@@ -7046,21 +7049,13 @@ reasoning_effort = "low"
             "#,
         )
         .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert_eq!(
-            cfg.telemetry.events_url.as_deref(),
-            Some("https://custom.example.com/events")
-        );
-        assert_eq!(cfg.telemetry.events_api_key.as_deref(), Some("custom-key"));
-        assert_eq!(
-            cfg.telemetry.mixpanel_token.as_deref(),
-            Some("custom-token")
-        );
-        assert!(!cfg.telemetry.mixpanel_enabled);
+        let cfg = Config::new_from_toml_cfg(&raw).expect("legacy keys must still parse");
+        assert!(!cfg.is_telemetry_enabled());
+        assert!(!cfg.is_trace_upload_enabled());
     }
-    /// Empty/whitespace values must become `None`, not reach the HTTP client as empty strings.
+    /// Empty/whitespace legacy values also parse fine and remain inert.
     #[test]
-    fn telemetry_empty_string_disables_sink() {
+    fn telemetry_legacy_empty_string_values_parse() {
         let raw: toml::Value = toml::from_str(
             r#"
             [telemetry]
@@ -7070,29 +7065,17 @@ reasoning_effort = "low"
             "#,
         )
         .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert!(cfg.telemetry.events_url.is_none());
-        assert!(cfg.telemetry.events_api_key.is_none());
-        assert!(cfg.telemetry.mixpanel_token.is_none());
+        let cfg = Config::new_from_toml_cfg(&raw).expect("legacy keys must still parse");
+        assert!(!cfg.is_telemetry_enabled());
     }
+    /// An empty `[telemetry]` table equals the default (empty) config.
     #[test]
-    fn telemetry_partial_override_retains_defaults() {
-        let raw: toml::Value = toml::from_str(
-            r#"
-            [telemetry]
-            events_url = "https://my-proxy/events"
-            "#,
-        )
-        .unwrap();
+    fn telemetry_table_defaults_are_inert() {
+        let raw: toml::Value = toml::from_str("[telemetry]\n").unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
-        assert_eq!(
-            cfg.telemetry.events_url.as_deref(),
-            Some("https://my-proxy/events")
-        );
-        let defaults = TelemetryConfig::default();
-        assert_eq!(cfg.telemetry.events_api_key, defaults.events_api_key);
-        assert_eq!(cfg.telemetry.mixpanel_token, defaults.mixpanel_token);
-        assert_eq!(cfg.telemetry.mixpanel_enabled, defaults.mixpanel_enabled);
+        let _defaults = TelemetryConfig::default();
+        assert!(!cfg.is_telemetry_enabled());
+        assert!(!cfg.is_trace_upload_enabled());
     }
     #[test]
     fn auth_alias_maps_to_grok_com_config() {
@@ -8091,38 +8074,20 @@ reasoning_effort = "low"
     }
     #[test]
     #[serial]
-    fn resolve_trace_upload_disabled_when_telemetry_off_despite_remote_flag() {
-        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
+    fn resolve_trace_upload_disabled_despite_config_env_and_requirement() {
+        unsafe { std::env::set_var("GROK_TELEMETRY_ENABLED", "1") };
+        unsafe { std::env::set_var("GROK_TELEMETRY_TRACE_UPLOAD", "1") };
         let mut cfg = Config::default();
         cfg.features.telemetry = Some(TelemetryMode::Disabled);
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
-            trace_upload_enabled: Some(true),
-            ..Default::default()
-        });
-        let r = cfg.resolve_trace_upload();
-        assert!(!r.value, "telemetry off must force trace upload off");
-        assert!(!cfg.is_trace_upload_enabled());
-    }
-    #[test]
-    #[serial]
-    fn resolve_trace_upload_explicit_config_wins_over_telemetry_off() {
-        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
-        let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Disabled);
-        cfg.telemetry.trace_upload = Some(true);
-        let r = cfg.resolve_trace_upload();
-        assert!(
-            r.value,
-            "explicit trace_upload config wins over telemetry off"
-        );
-        assert_eq!(r.source, ConfigSource::Config);
-        cfg.telemetry.trace_upload = None;
         cfg.requirements
             .trace_upload
             .pin(true, crate::config::RequirementSource::Unknown);
-        assert!(cfg.resolve_trace_upload().value);
+        let r = cfg.resolve_trace_upload();
+        assert!(!r.value, "trace upload is removed; always disabled");
+        assert_eq!(r.source, ConfigSource::Default);
+        assert!(!cfg.is_trace_upload_enabled());
+        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+        unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
     }
     #[test]
     #[serial]
@@ -8141,26 +8106,25 @@ reasoning_effort = "low"
         assert_eq!(d["telemetry_mode"], serde_json::json!("false"));
         assert_eq!(d["in_remote_trace_upload_enabled"], serde_json::json!(true));
         assert_eq!(d["has_remote_settings"], serde_json::json!(true));
-        cfg.telemetry.trace_upload = Some(true);
-        let d = cfg.trace_upload_decision_debug();
-        assert_eq!(d["trace_upload"], serde_json::json!(true));
-        assert_eq!(d["trace_upload_source"], serde_json::json!("config"));
-        assert_eq!(d["in_cfg_telemetry_trace_upload"], serde_json::json!(true));
     }
     #[test]
     #[serial]
-    fn resolve_trace_upload_honors_config_when_telemetry_on() {
-        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
+    fn resolve_telemetry_mode_disabled_regardless_of_inputs() {
+        unsafe { std::env::set_var("GROK_TELEMETRY_ENABLED", "1") };
         let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Enabled);
-        cfg.telemetry.trace_upload = Some(false);
-        let r = cfg.resolve_trace_upload();
-        assert!(!r.value);
-        assert_eq!(r.source, ConfigSource::Config);
-        cfg.telemetry.trace_upload = None;
-        let r = cfg.resolve_trace_upload();
-        assert!(r.value, "defaults on when telemetry fully enabled");
+        cfg.features.telemetry = Some(TelemetryMode::Disabled);
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+            telemetry_enabled: Some(true),
+            ..Default::default()
+        });
+        let r = cfg.resolve_telemetry_mode();
+        assert_eq!(r.value, TelemetryMode::Disabled);
+        assert!(!r.value.is_enabled());
+        assert!(!r.value.session_metrics_enabled());
+        assert!(!cfg.is_telemetry_enabled());
+        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
+        let r = cfg.resolve_telemetry_mode();
+        assert_eq!(r.value, TelemetryMode::Disabled);
     }
     #[test]
     #[serial]
@@ -10361,11 +10325,11 @@ hooks = true
     #[test]
     fn telemetry_mode_toml_roundtrip() {
         let cfg: Features = toml::from_str("telemetry = true").unwrap();
-        assert_eq!(cfg.telemetry, Some(TelemetryMode::Enabled));
+        assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));
         let cfg: Features = toml::from_str("telemetry = false").unwrap();
         assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));
         let cfg: Features = toml::from_str(r#"telemetry = "session_metrics""#).unwrap();
-        assert_eq!(cfg.telemetry, Some(TelemetryMode::SessionMetrics));
+        assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));
         let cfg: Features =
             toml::from_str(r#"telemetry = "metrics_v3""#).expect("unknown string must not error");
         assert_eq!(cfg.telemetry, Some(TelemetryMode::Disabled));

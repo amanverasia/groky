@@ -125,3 +125,48 @@ fn default_config_serializes_without_network_fields() {
         );
     }
 }
+
+#[test]
+fn init_if_needed_cannot_enable() {
+    client::init_if_needed(
+        TelemetryConfig::default(),
+        serde_json::from_str::<TelemetryMode>("true").unwrap(),
+        Some("user".to_owned()),
+        Some("team".to_owned()),
+        Some("deploy-key".to_owned()),
+        None,
+        "test".to_owned(),
+        Some("pro".to_owned()),
+        reqwest::Client::new(),
+    );
+
+    assert!(!client::is_enabled());
+    assert!(!client::is_session_metrics_enabled());
+}
+
+#[test]
+fn sync_profile_is_a_noop() {
+    // Must not panic and must not flip any client state.
+    client::sync_profile();
+    assert!(!client::is_enabled());
+    assert!(!client::is_session_metrics_enabled());
+}
+
+#[test]
+fn telemetry_mode_serializes_to_false() {
+    assert_eq!(
+        serde_json::to_value(TelemetryMode::Disabled).unwrap(),
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(TelemetryMode::Disabled.to_string(), "false");
+}
+
+#[test]
+fn telemetry_mode_parse_policy() {
+    // Empty and whitespace-only inputs do not parse.
+    assert_eq!(TelemetryMode::parse(""), None);
+    assert_eq!(TelemetryMode::parse("   "), None);
+    assert_eq!(TelemetryMode::parse("\t\n"), None);
+    // Current policy: any non-empty string (even nonsense) parses to Disabled.
+    assert_eq!(TelemetryMode::parse("banana"), Some(TelemetryMode::Disabled));
+}

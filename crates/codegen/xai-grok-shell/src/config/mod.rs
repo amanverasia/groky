@@ -1064,8 +1064,16 @@ fn apply_requirements_inner(
     pin_feature!(voice_mode);
     pin_requirement_only!(remote_fetch);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {
-        config.requirements.trace_upload.pin(val, source.clone());
-        push("telemetry.trace_upload", "false".to_owned());
+        // Trace upload is removed; resolution always returns disabled. Pin
+        // `false` (never the raw admin value) so the pin matches behavior,
+        // and only record enforcement when the requirement asked for `true`.
+        config.requirements.trace_upload.pin(false, source.clone());
+        if val {
+            push(
+                "telemetry.trace_upload",
+                "requirement ignored: trace upload removed".to_owned(),
+            );
+        }
     }
     enforce_opt!("cli", "auto_update", config.cli.auto_update);
     enforce_opt!("cli", "use_leader", config.cli.use_leader);

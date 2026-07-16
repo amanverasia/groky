@@ -1455,7 +1455,7 @@ impl MvpAgent {
         } else {
             tracing::debug!("Relay sync: DISABLED (not in TUI mode)");
         }
-        tracing::info!(
+        tracing::debug!(
             enabled = false,
             reason = "telemetry_removed",
             "trace_upload_status"
