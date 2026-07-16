@@ -3871,7 +3871,91 @@ pub(crate) fn first_own_credential(
 ///
 /// When `env_key` lists multiple names, the first set non-empty value is used.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
+    resolve_credentials_with(
+        model,
+        session_key,
+        || crate::agent::auth_method::read_xai_api_key_env().ok(),
+        |_| None,
+        |provider_id| {
+            crate::auth::read_provider_api_key(&crate::util::grok_home::grok_home(), provider_id)
+        },
+    )
+}
+/// Injectable credential-resolution seam, dispatched on the entry's
+/// [`CredentialPolicy`].
+///
+/// - `XaiLegacy`: current behavior, unchanged — model api_key/env_key >
+///   `session_key` > `xai_env_key()`.
+/// - `ProviderApiKey`: `session_provider_key` > `stored_provider_key` >
+///   catalog provider env vars > model api_key/env_key. The xAI session
+///   token and `XAI_API_KEY` are **never** consulted.
+/// - `ExplicitModel`: model api_key/env_key only; no fallbacks.
+/// - `None`: no key is attached.
+pub fn resolve_credentials_with(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    xai_env_key: impl FnOnce() -> Option<String>,
+    session_provider_key: impl FnOnce(&str) -> Option<String>,
+    stored_provider_key: impl FnOnce(&str) -> Option<String>,
+) -> ResolvedCredentials {
     let info = model.info();
+    match model.credential_policy {
+        CredentialPolicy::XaiLegacy => {}
+        CredentialPolicy::ProviderApiKey => {
+            let provider = model
+                .provider_id
+                .as_ref()
+                .map(xai_grok_catalog::ProviderId::as_str);
+            let (api_key, origin) = provider
+                .and_then(|p| session_provider_key(p).map(|k| (k, "session_provider")))
+                .or_else(|| {
+                    model
+                        .provider_id
+                        .as_ref()
+                        .and_then(|p| stored_provider_key(p.as_str()).map(|k| (k, "stored")))
+                })
+                .or_else(|| {
+                    model
+                        .provider_id
+                        .as_ref()
+                        .and_then(catalog_provider_env_credential)
+                        .map(|k| (k, "environment"))
+                })
+                .or_else(|| model.own_credential().map(|k| (k, "model")))
+                .map_or((None, "none"), |(k, origin)| (Some(k), origin));
+            tracing::debug!(
+                model = % info.model, origin, "resolved provider credentials"
+            );
+            return ResolvedCredentials {
+                api_key,
+                base_url: info.base_url.clone(),
+                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_scheme: info.auth_scheme,
+            };
+        }
+        CredentialPolicy::ExplicitModel => {
+            let api_key = model.own_credential();
+            tracing::debug!(
+                model = % info.model, origin = if api_key.is_some() { "model" } else { "none" },
+                "resolved explicit-model credentials"
+            );
+            return ResolvedCredentials {
+                api_key,
+                base_url: info.base_url.clone(),
+                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_scheme: info.auth_scheme,
+            };
+        }
+        CredentialPolicy::None => {
+            tracing::debug!(model = % info.model, origin = "none", "unauthenticated provider");
+            return ResolvedCredentials {
+                api_key: None,
+                base_url: info.base_url.clone(),
+                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_scheme: info.auth_scheme,
+            };
+        }
+    }
     let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
@@ -3884,7 +3968,7 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             info.base_url.clone(),
             xai_chat_state::AuthType::SessionToken,
         )
-    } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
+    } else if let Some(key) = xai_env_key() {
         let url = model
             .api_base_url
             .clone()
@@ -3916,6 +4000,22 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
         auth_type,
         auth_scheme,
     }
+}
+/// First set, non-blank value of the provider's catalog env vars (embedded
+/// catalog plus reviewed overrides). Env var *names* are not secrets; values
+/// are returned to the caller and never logged.
+fn catalog_provider_env_credential(provider_id: &xai_grok_catalog::ProviderId) -> Option<String> {
+    static CATALOG: std::sync::OnceLock<xai_grok_catalog::NormalizedCatalog> =
+        std::sync::OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| {
+        xai_grok_catalog::apply_patch(
+            xai_grok_catalog::embedded_catalog(),
+            xai_grok_catalog::load_overrides(),
+        )
+        .unwrap_or_else(|_| xai_grok_catalog::embedded_catalog())
+    });
+    let provider = catalog.provider(provider_id)?;
+    EnvKeys::new(provider.env_vars.iter().cloned()).resolve_value()
 }
 /// `disable_api_key_auth` at the credential seam: swap a first-party xAI API
 /// key for the IdP session (absent => request fails => forces login). BYOK
