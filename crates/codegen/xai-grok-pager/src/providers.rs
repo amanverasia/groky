@@ -92,6 +92,19 @@ pub fn provider_rows(list: &ProviderListResponse) -> Vec<ProviderRowView> {
         .collect()
 }
 
+/// Map a catalog `refresh_status` wire string to the notice shown in the
+/// `/model` picker. `fresh` (and unknown values) show nothing; `stale` and
+/// `refreshing` announce the in-flight refresh; `cachedAfterError` states
+/// that cached rows are in use. Never closes the picker or moves selection —
+/// callers only swap this text.
+pub fn catalog_notice_for_status(refresh_status: &str) -> Option<String> {
+    match refresh_status {
+        "stale" | "refreshing" => Some("Refreshing provider catalog".to_string()),
+        "cachedAfterError" => Some("Using cached provider catalog; refresh failed".to_string()),
+        _ => None,
+    }
+}
+
 /// An API key in transit from the masked input to effect execution.
 ///
 /// `Debug` is implemented manually and never prints the key, so actions

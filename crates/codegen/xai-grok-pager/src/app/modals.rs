@@ -584,16 +584,25 @@ impl AgentView {
                 }) = self.active_modal.as_mut()
                 {
                     let q = state.query.to_lowercase();
-                    *items = original_items
-                        .iter()
-                        .filter(|item| {
-                            q.is_empty()
-                                || item.match_text.to_lowercase().contains(&q)
-                                || item.display.to_lowercase().contains(&q)
-                                || item.description.to_lowercase().contains(&q)
-                        })
-                        .cloned()
-                        .collect();
+                    // Model rows carry identity metadata (`model_id`) and use
+                    // the deterministic weighted ranker: direct provider/model
+                    // matches beat display-name fuzzy proxies. Other pickers
+                    // keep the simple substring filter.
+                    if original_items.iter().any(|item| item.model_id.is_some()) {
+                        *items =
+                            crate::slash::commands::model::rank_model_items(original_items, &q);
+                    } else {
+                        *items = original_items
+                            .iter()
+                            .filter(|item| {
+                                q.is_empty()
+                                    || item.match_text.to_lowercase().contains(&q)
+                                    || item.display.to_lowercase().contains(&q)
+                                    || item.description.to_lowercase().contains(&q)
+                            })
+                            .cloned()
+                            .collect();
+                    }
                     state.selected = state.selected.min(items.len().saturating_sub(1));
                 }
                 InputOutcome::Changed
@@ -854,7 +863,7 @@ impl AgentView {
                                             })
                                         };
                                         self.active_modal = Some(ActiveModal::ArgPicker {
-                                            command: trimmed,
+                                            command: trimmed.clone(),
                                             args_query: String::new(),
                                             items: items.clone(),
                                             original_items: items,
@@ -865,6 +874,13 @@ impl AgentView {
                                             window:
                                                 crate::views::modal_window::ModalWindowState::new(),
                                         });
+                                        // Model picker: render from current
+                                        // state now, refresh the provider
+                                        // catalog in the background (one
+                                        // coalesced effect per open).
+                                        if matches!(trimmed.as_str(), "model" | "m") {
+                                            return InputOutcome::Action(Action::RefreshProviders);
+                                        }
                                         return InputOutcome::Changed;
                                     }
                                 }
@@ -1752,11 +1768,18 @@ impl AgentView {
             {
                 // Arg picker: ModalWindow chrome + picker content.
                 let title = match command.as_str() {
-                    "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                    "model" | "m" => "Pick model",
-                    "theme" | "t" => "Pick theme",
-                    _ => "Pick option",
+                    "model" | "m" if !args_query.is_empty() => "Pick reasoning effort".to_string(),
+                    // Surface the provider-catalog freshness notice inline —
+                    // the picker never closes or moves selection while a
+                    // background refresh is in flight.
+                    "model" | "m" => match self.session.models.catalog_notice.as_deref() {
+                        Some(notice) => format!("Pick model \u{b7} {notice}"),
+                        None => "Pick model".to_string(),
+                    },
+                    "theme" | "t" => "Pick theme".to_string(),
+                    _ => "Pick option".to_string(),
                 };
+                let title = title.as_str();
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
                     .enumerate()

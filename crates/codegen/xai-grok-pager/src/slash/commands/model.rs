@@ -148,20 +148,115 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
     None
 }
 
+/// Provider metadata parsed from a model's ACP `meta` extension point.
+/// Secret-free by construction (ids, display name, context size only).
+struct ModelPickerMetadata {
+    provider_id: Option<String>,
+    provider_name: Option<String>,
+    context_tokens: Option<u64>,
+    reasoning: bool,
+}
+
+impl ModelPickerMetadata {
+    fn from_info(info: &acp::ModelInfo) -> Self {
+        let meta = info.meta.as_ref();
+        let get_str = |key: &str| {
+            meta.and_then(|m| m.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        };
+        Self {
+            provider_id: get_str("providerId"),
+            provider_name: get_str("providerName"),
+            context_tokens: meta
+                .and_then(|m| m.get("totalContextTokens"))
+                .and_then(|v| v.as_u64()),
+            reasoning: supports_reasoning_effort_meta(meta),
+        }
+    }
+
+    /// `provider/model` identity used for direct-match ranking and the row
+    /// description. Model ids from the provider catalog are already
+    /// qualified (`openai/gpt-5`); avoid double-prefixing those.
+    fn qualified(&self, model_id: &str) -> Option<String> {
+        let provider = self.provider_id.as_deref()?;
+        if model_id.starts_with(&format!("{provider}/")) {
+            Some(model_id.to_owned())
+        } else {
+            Some(format!("{provider}/{model_id}"))
+        }
+    }
+}
+
+/// `400000` → `"400k"`, sub-thousand windows verbatim.
+fn format_context_tokens(tokens: u64) -> String {
+    if tokens >= 1000 {
+        format!("{}k", tokens / 1000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// One row per logical model. Reasoning models get a trailing space in
 /// `insert_text` so the prompt widget chains into the effort sub-menu.
-fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
+///
+/// Rows are provider-aware: display appends the provider name, the
+/// description is `provider/model · 400k context · reasoning`, and the
+/// match text is the newline-joined provider id, `provider/model`, model
+/// id, and display name so direct identity queries hit without polluting
+/// the display. Empty-query order: current model first, then
+/// `(provider_id, model_id)` ascending.
+pub fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
     let current_id = models.current.as_ref();
-    let mut items: Vec<ArgItem> = Vec::with_capacity(models.available.len());
+    let mut rows: Vec<(bool, String, String, ArgItem)> = Vec::with_capacity(models.available.len());
     for (id, info) in &models.available {
         let is_current = current_id == Some(id);
-        let supports = supports_reasoning_effort(info);
+        let meta = ModelPickerMetadata::from_info(info);
+        let supports = meta.reasoning;
+        let model_id_str = id.0.as_ref().to_owned();
+        let qualified = meta.qualified(&model_id_str);
 
-        let display = if is_current {
+        let mut display = if is_current {
             format!("{} (current)", info.name)
         } else {
             info.name.clone()
         };
+        if let Some(provider_name) = &meta.provider_name {
+            display = format!("{display}  {provider_name}");
+        }
+
+        let description = {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(qualified) = &qualified {
+                parts.push(qualified.clone());
+            }
+            if let Some(tokens) = meta.context_tokens {
+                parts.push(format!("{} context", format_context_tokens(tokens)));
+            }
+            if supports {
+                parts.push("reasoning".to_string());
+            }
+            if parts.is_empty() {
+                info.description.clone().unwrap_or_default()
+            } else {
+                parts.join(" \u{b7} ")
+            }
+        };
+
+        // Newline-joined identity lines for the matcher: provider id,
+        // provider/model, model id, display name. Costs stay in ACP meta.
+        let mut match_lines: Vec<&str> = Vec::with_capacity(4);
+        if let Some(provider) = meta.provider_id.as_deref() {
+            match_lines.push(provider);
+        }
+        if let Some(qualified) = qualified.as_deref() {
+            match_lines.push(qualified);
+        }
+        if qualified.as_deref() != Some(model_id_str.as_str()) {
+            match_lines.push(&model_id_str);
+        }
+        match_lines.push(&info.name);
+        let match_text = match_lines.join("\n");
 
         // Trailing space on reasoning models: signals "more input
         // expected" to the prompt widget so Enter advances to effort
@@ -172,14 +267,91 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             info.name.clone()
         };
 
-        items.push(ArgItem {
-            display,
-            match_text: info.name.clone(),
-            insert_text,
-            description: info.description.clone().unwrap_or_default(),
-        });
+        rows.push((
+            is_current,
+            meta.provider_id.clone().unwrap_or_default(),
+            model_id_str.clone(),
+            ArgItem {
+                display,
+                match_text,
+                insert_text,
+                description,
+                explicit_score: None,
+                model_id: Some(model_id_str),
+            },
+        ));
     }
-    items
+    // Current first, then (provider_id, model_id) ascending — deterministic
+    // regardless of catalog insertion order.
+    rows.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    rows.into_iter().map(|(_, _, _, item)| item).collect()
+}
+
+/// Deterministic weighted ranking for model rows. Direct identity matches
+/// (normalized ASCII-lowercase) outweigh any fuzzy proxy:
+/// qualified exact (1_000_000) > qualified prefix (900_000) > model id
+/// (800_000) > provider id (700_000); the existing nucleo fuzzy score over
+/// the row's match text breaks ties. Rows with neither a direct nor a fuzzy
+/// hit are dropped. An empty query returns the rows unchanged (the
+/// current-first `(provider, model)` order from [`build_model_items`]).
+pub fn rank_model_items(items: &[ArgItem], query: &str) -> Vec<ArgItem> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return items.to_vec();
+    }
+
+    let mut matcher = crate::slash::matcher::FuzzyMatcher::new();
+    let fuzzy_hits: std::collections::HashMap<usize, u32> = matcher
+        .rank(items, &query, items.len(), |item| item.match_text.as_str())
+        .into_iter()
+        .collect();
+
+    let mut scored: Vec<ArgItem> = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        // build_model_items writes `provider/model` as a match line when
+        // provider metadata exists; the provider id is its prefix.
+        let qualified = item.match_text.lines().find(|line| line.contains('/'));
+        let provider_id = qualified.and_then(|q| q.split('/').next());
+        let model_id = item.model_id.as_deref().unwrap_or_default();
+
+        let qualified_lc = qualified.map(str::to_ascii_lowercase);
+        let direct: i64 = if qualified_lc.as_deref() == Some(query.as_str()) {
+            1_000_000
+        } else if qualified_lc
+            .as_deref()
+            .is_some_and(|q| q.starts_with(query.as_str()))
+        {
+            900_000
+        } else if model_id.eq_ignore_ascii_case(&query) {
+            800_000
+        } else if provider_id.is_some_and(|p| p.eq_ignore_ascii_case(&query)) {
+            700_000
+        } else {
+            0
+        };
+
+        let fuzzy = fuzzy_hits.get(&idx).copied();
+        if direct == 0 && fuzzy.is_none() {
+            continue;
+        }
+        let mut ranked = item.clone();
+        ranked.explicit_score = Some(direct.saturating_add(i64::from(fuzzy.unwrap_or(0))));
+        scored.push(ranked);
+    }
+    // Descending explicit score; stable sort keeps the deterministic
+    // build order as the final tie-break.
+    scored.sort_by_key(|item| std::cmp::Reverse(item.explicit_score));
+    scored
+}
+
+/// [`build_model_items`] + [`rank_model_items`] in one call (test surface
+/// and modal-filter entry point).
+pub fn scored_model_items(models: &ModelState, query: &str) -> Vec<ArgItem> {
+    rank_model_items(&build_model_items(models), query)
 }
 
 /// One row per effort level for the `/model` chained effort phase.
@@ -286,12 +458,15 @@ mod tests {
         // Enter so the effort sub-menu can render.
         let reasoning = items
             .iter()
-            .find(|i| i.match_text == "Reasoning X")
+            .find(|i| i.model_id.as_deref() == Some("reasoning-x"))
             .unwrap();
         assert_eq!(reasoning.insert_text, "Reasoning X ");
 
         // Plain model has no trailing space -- Enter commits immediately.
-        let plain = items.iter().find(|i| i.match_text == "Grok 4.5").unwrap();
+        let plain = items
+            .iter()
+            .find(|i| i.model_id.as_deref() == Some("grok-4.5"))
+            .unwrap();
         assert_eq!(plain.insert_text, "Grok 4.5");
     }
 

@@ -57,6 +57,11 @@ pub struct ModelState {
     /// reading from the current model's metadata. Used for subagent
     /// views where SubagentProgress reports the actual window size.
     context_window_override: Option<u64>,
+    /// Human-readable provider-catalog freshness notice for the model picker
+    /// (`None` = fresh; `Some` = refreshing / cached-after-error text).
+    /// Updated from `x.ai/providers/update` refresh status; never carries
+    /// secrets.
+    pub catalog_notice: Option<String>,
 }
 
 impl ModelState {
@@ -161,6 +166,20 @@ impl ModelState {
                 .and_then(|id| self.available.get(id))
                 .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
         }
+    }
+
+    /// [`Self::update_catalog`] plus the provider-catalog freshness notice
+    /// carried by the same background refresh. Current selection and a
+    /// user-set reasoning effort are preserved exactly as `update_catalog`
+    /// guarantees; the notice replaces any previous notice (`None` clears it).
+    pub fn apply_catalog_update(
+        &mut self,
+        new_available: IndexMap<acp::ModelId, acp::ModelInfo>,
+        fallback_current: Option<acp::ModelId>,
+        notice: Option<String>,
+    ) {
+        self.update_catalog(new_available, fallback_current);
+        self.catalog_notice = notice;
     }
 
     /// Set the current model and resolve reasoning effort from catalog meta.
@@ -325,6 +344,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     current: current_model,
                     reasoning_effort,
                     context_window_override: None,
+                    catalog_notice: None,
                 }
             })
             .unwrap_or_default()
