@@ -43,6 +43,13 @@ pub enum CatalogError {
     /// The raw document could not be parsed.
     #[error("invalid catalog document: {0}")]
     InvalidDocument(String),
+    /// A network refresh failed; the message is concise status text and
+    /// never embeds response bodies.
+    #[error("catalog fetch failed: {0}")]
+    Fetch(String),
+    /// The on-disk catalog cache could not be read, validated, or written.
+    #[error("catalog cache error: {0}")]
+    Cache(String),
     /// A field value failed validation.
     #[error("invalid {field} in {context}: {reason}")]
     InvalidField {

@@ -12546,11 +12546,15 @@ dependencies = [
 name = "xai-grok-catalog"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "chrono",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

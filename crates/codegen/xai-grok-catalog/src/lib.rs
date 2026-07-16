@@ -4,17 +4,24 @@
 //! and field-aware layering. This crate must not depend on shell, pager,
 //! sampler, auth, ACP, or sampling-types.
 
+pub mod cache;
 pub mod credentials;
 pub mod layer;
 pub mod normalize;
+pub mod refresh;
 pub mod types;
 
+pub use cache::{CatalogCache, decode_cache, encode_cache};
 pub use credentials::{
     CredentialOrigin, CredentialSources, ProviderAvailability, ProviderStatus, ResolvedCredential,
     SecretString, classify_provider, resolve_credential,
 };
 pub use layer::{CatalogPatch, ModelPatch, ProviderPatch, apply_patch};
 pub use normalize::normalize_models_dev;
+pub use refresh::{
+    CacheMetadata, CatalogManager, CatalogSnapshot, DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_REFRESH_INTERVAL, RefreshLimits, RefreshOutcome, RefreshStatus,
+};
 pub use types::{
     CATALOG_SCHEMA_VERSION, CatalogError, CatalogModel, CatalogProvider, ModelCost, ModelId,
     NormalizationLimits, NormalizedCatalog, Protocol, ProviderId,
