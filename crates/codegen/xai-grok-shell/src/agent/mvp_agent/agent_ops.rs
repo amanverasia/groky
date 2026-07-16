@@ -410,7 +410,6 @@ impl MvpAgent {
         Some((base_url, user_token, alpha_test_key, deployment_key))
     }
     pub(super) fn ensure_telemetry_client(&self) {
-        crate::auth::credential_provider::sync_external_otel_identity();
         let cfg = self.cfg.borrow();
         let mode = cfg.resolve_telemetry_mode().value;
         if !mode.is_disabled() {
@@ -830,7 +829,6 @@ impl MvpAgent {
             subscription_tier,
             crate::http::shared_client(),
         );
-        crate::auth::credential_provider::sync_external_otel_identity();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
         self.reconfigure_heap_profile_monitor();
     }
@@ -1574,12 +1572,6 @@ impl MvpAgent {
                 instance.cfg.borrow().grok_com_config.auth_provider_command.clone(),
                 instance.diagnostic_upload_config(),
             );
-        crate::auth::credential_provider::wire_otel_auth_manager(
-            instance.auth_manager.clone(),
-        );
-        if let Some(ref dk) = instance.cfg.borrow().endpoints.deployment_key {
-            crate::auth::credential_provider::wire_otel_deployment_key(dk.clone());
-        }
         instance
     }
     /// Handle `x.ai/internal/evict_sessions` — the leader server tells us a

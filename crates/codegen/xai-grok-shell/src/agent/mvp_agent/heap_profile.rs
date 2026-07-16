@@ -189,8 +189,6 @@ mod tests {
             jemalloc_heap_profile_enabled: Some(true),
             jemalloc_heap_profile_thresholds_bytes: Some(vec![1_000_000]),
             jemalloc_heap_profile_poll_interval_secs: Some(30),
-            trace_upload_enabled: Some(true),
-            telemetry_mode: Some("all".into()),
             ..Default::default()
         });
 
@@ -218,8 +216,6 @@ mod tests {
             jemalloc_heap_profile_enabled: Some(true),
             jemalloc_heap_profile_thresholds_bytes: Some(vec![1_000_000]),
             jemalloc_heap_profile_poll_interval_secs: Some(30),
-            trace_upload_enabled: Some(true),
-            telemetry_mode: Some("all".into()),
             ..Default::default()
         });
 
@@ -270,8 +266,6 @@ mod tests {
         assert_eq!(free.thresholds, thresholds);
 
         let cfg = cfg_with_remote(crate::util::config::RemoteSettings {
-            trace_upload_enabled: Some(true),
-            telemetry_mode: Some("all".into()),
             jemalloc_heap_profile_enabled: Some(false),
             jemalloc_heap_profile_thresholds_bytes: Some(vec![100]),
             ..Default::default()
@@ -307,8 +301,6 @@ mod tests {
             jemalloc_heap_profile_enabled: Some(true),
             jemalloc_heap_profile_thresholds_bytes: Some(thresholds.clone()),
             jemalloc_heap_profile_poll_interval_secs: Some(45),
-            trace_upload_enabled: Some(true),
-            telemetry_mode: Some("all".into()),
             ..Default::default()
         });
 

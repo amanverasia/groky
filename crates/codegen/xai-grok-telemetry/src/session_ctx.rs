@@ -28,33 +28,13 @@ impl TelemetryCtx {
     }
 }
 
-/// Snapshot of the ambient ctx for the external OTEL stream.
-pub(crate) struct ExternalCtxSnapshot {
-    pub session_id: String,
-    pub turn_number: Option<u32>,
-    pub prompt_id: Option<String>,
-}
-
 /// Rotate the per-prompt correlation UUID at turn start (where
-/// `prompt_index` increments). No-op outside a session ctx scope. The id is
-/// attached as `prompt.id` to external OTEL events only.
+/// `prompt_index` increments). No-op outside a session ctx scope. Retained
+/// for local correlation only.
 pub fn begin_prompt_id() {
     let _ = TELEMETRY_CTX.try_with(|c| {
         *c.prompt_id.lock() = Some(uuid::Uuid::new_v4().to_string());
     });
-}
-
-/// Snapshot the task-local ctx (if any) for external emission. Non-blocking:
-/// a contended `prompt_index` lock yields `turn_number = None` rather than
-/// stalling the emitting task.
-pub(crate) fn external_ctx_snapshot() -> Option<ExternalCtxSnapshot> {
-    TELEMETRY_CTX
-        .try_with(|c| ExternalCtxSnapshot {
-            session_id: c.session_id.clone(),
-            turn_number: c.prompt_index.try_lock().map(|g| *g as u32).ok(),
-            prompt_id: c.prompt_id.lock().clone(),
-        })
-        .ok()
 }
 
 tokio::task_local! {

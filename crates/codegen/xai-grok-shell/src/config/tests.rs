@@ -2558,6 +2558,33 @@ fn config_layers_user_overrides_managed() {
     );
     assert!(! cfg.is_telemetry_enabled());
 }
+/// The external-OTEL config keys were removed along with the OTLP export
+/// pipelines. Managed/user configs that still carry them must parse fine
+/// (unknown keys are tolerated) and produce no enforcement: telemetry stays
+/// disabled and the keys have no effect.
+#[test]
+fn removed_external_otel_keys_are_inert() {
+    let layers = ConfigLayers {
+        system_managed: toml::Value::Table(Default::default()),
+        managed: toml::from_str(
+            "[telemetry]\notel_enabled = true\notel_logs_exporter = \"otlp\"\notel_endpoint = \"https://collector.corp.example:4318\"\n",
+        )
+        .unwrap(),
+        user: toml::Value::Table(Default::default()),
+        user_requirements: None,
+        system_requirements: None,
+        mdm_requirements: None,
+        ..Default::default()
+    };
+    let cfg =
+        crate::agent::config::Config::new_from_toml_cfg(&layers.effective_config_disk_only())
+            .expect("removed otel keys must not break config parsing");
+    assert!(!cfg.is_telemetry_enabled());
+    assert_eq!(
+        cfg.resolve_telemetry_mode().value,
+        crate::agent::config::TelemetryMode::Disabled,
+    );
+}
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
 /// `requirements.toml` (deployment key + S3 trace upload) via the actual

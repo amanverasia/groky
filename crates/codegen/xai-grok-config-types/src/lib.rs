@@ -457,31 +457,7 @@ pub struct RemoteSettings {
     pub managed_mcps_enabled: Option<bool>,
     #[serde(default)]
     pub managed_mcp_gateway_tools_enabled: Option<bool>,
-    /// Fleet kill switch for the **external OTEL** stream (customer
-    /// collectors). Restrictive-only by construction: there is deliberately
-    /// no `external_otel_enabled` remote field — remote settings are fetched
-    /// per-run and never persisted, so a remote "enable" could never reach
-    /// init; org-wide enable ships via managed config instead. Applied
-    /// in-process (tighten-only) via
-    /// `xai_grok_telemetry::external::apply_remote_policy`.
-    #[serde(default)]
-    pub external_otel_disabled: Option<bool>,
-    /// Force the external stream's content gates (`OTEL_LOG_USER_PROMPTS`,
-    /// `OTEL_LOG_TOOL_DETAILS`) off regardless of local env/config.
-    /// Tighten-only, like `external_otel_disabled`.
-    #[serde(default)]
-    pub external_otel_content_gates_locked: Option<bool>,
-    #[serde(default)]
-    pub telemetry_enabled: Option<bool>,
-    /// Telemetry mode override (string): `"session-metrics"`, `"full"`, `"off"`.
-    /// Takes precedence over `telemetry_enabled` (bool) when present.
-    #[serde(default)]
-    pub telemetry_mode: Option<String>,
-    #[serde(default)]
-    pub trace_upload_enabled: Option<bool>,
     /// Enable user-facing feedback (heuristic popups, `/feedback` command).
-    /// Session analytics (signal sync, turn deltas) are gated separately
-    /// by `telemetry_enabled`.
     #[serde(default)]
     pub feedback_enabled: Option<bool>,
     /// Two-pass (prefire) compaction. When approaching the auto-compact

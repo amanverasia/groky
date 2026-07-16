@@ -90,7 +90,6 @@ fn settings(enabled: bool, thresholds: &[u64]) -> RemoteSettings {
         jemalloc_heap_profile_enabled: Some(enabled),
         jemalloc_heap_profile_thresholds_bytes: Some(thresholds.to_vec()),
         jemalloc_heap_profile_poll_interval_secs: Some(5),
-        trace_upload_enabled: Some(true),
         ..Default::default()
     }
 }
@@ -109,7 +108,7 @@ fn resolve_from_settings(settings: &RemoteSettings) -> JemallocHeapProfileConfig
         settings.jemalloc_heap_profile_thresholds_bytes.as_deref(),
         settings.jemalloc_heap_profile_poll_interval_secs,
         false,
-        settings.trace_upload_enabled == Some(true),
+        true,
         heap_profile::prof_available(),
     )
 }
@@ -358,21 +357,6 @@ async fn storage_unauthorized_latches_without_accepted_upload() {
 #[serial_test::serial(heap_profile_integration)]
 async fn empty_thresholds_from_settings_stay_disabled() {
     let mut h = Harness::start(settings(true, &[])).await;
-    assert!(!h.mon.config().enabled);
-    assert!(!FAKE_PROF_ACTIVE.load(Ordering::Relaxed));
-
-    FAKE_RESIDENT.store(u64::MAX, Ordering::Relaxed);
-    h.mon.poll_tick().await;
-    assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 0);
-    assert_eq!(h.server.storage_request_count(), 0);
-}
-
-#[tokio::test]
-#[serial_test::serial(heap_profile_integration)]
-async fn trace_upload_disabled_keeps_monitor_off() {
-    let mut remote = settings(true, &[100]);
-    remote.trace_upload_enabled = Some(false);
-    let mut h = Harness::start(remote).await;
     assert!(!h.mon.config().enabled);
     assert!(!FAKE_PROF_ACTIVE.load(Ordering::Relaxed));
 
