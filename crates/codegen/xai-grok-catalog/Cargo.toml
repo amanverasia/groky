@@ -5,10 +5,19 @@ version = "0.1.0"
 edition.workspace = true
 description = "Dependency-neutral provider/model catalog types, bounded models.dev normalization, and field-aware layering"
 
+[features]
+# Enables live fetching in the `generate_catalog` binary; the library never
+# needs it, keeping the default dependency graph network-free.
+generator = ["dep:reqwest"]
+
 [dependencies]
+reqwest = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

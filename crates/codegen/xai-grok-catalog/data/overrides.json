@@ -1,6 +1,14 @@
 {
   "providers": [
     {
+      "id": "anthropic",
+      "api_base_url": "https://api.anthropic.com/v1"
+    },
+    {
+      "id": "openai",
+      "api_base_url": "https://api.openai.com/v1"
+    },
+    {
       "id": "xai",
       "api_base_url": "https://api.x.ai/v1",
       "env_vars": ["XAI_API_KEY"],

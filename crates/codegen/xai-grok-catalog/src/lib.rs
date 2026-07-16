@@ -15,6 +15,27 @@ pub use types::{
     NormalizationLimits, NormalizedCatalog, Protocol, ProviderId,
 };
 
+/// Loads the committed, generated catalog snapshot embedded in the binary.
+///
+/// The snapshot is a release artifact produced by `generate_catalog`, not
+/// remote input: a malformed or wrong-version snapshot panics at embedded
+/// startup with a path-specific message.
+pub fn embedded_catalog() -> NormalizedCatalog {
+    let catalog: NormalizedCatalog =
+        serde_json::from_slice(include_bytes!("../data/models-dev.json")).unwrap_or_else(|err| {
+            panic!(
+                "malformed embedded catalog at \
+                 crates/codegen/xai-grok-catalog/data/models-dev.json: {err}"
+            )
+        });
+    assert_eq!(
+        catalog.schema_version, CATALOG_SCHEMA_VERSION,
+        "embedded catalog schema version mismatch at \
+         crates/codegen/xai-grok-catalog/data/models-dev.json"
+    );
+    catalog
+}
+
 /// Loads the committed, reviewed override patch embedded in the binary.
 ///
 /// The overrides file is a release artifact, not remote input: a malformed
@@ -58,5 +79,39 @@ mod tests {
         let xai = merged.provider_str("xai").unwrap();
         assert_eq!(xai.api_base_url, "https://api.x.ai/v1");
         assert_eq!(xai.env_vars, ["XAI_API_KEY"]);
+    }
+
+    #[test]
+    fn embedded_overrides_supply_base_urls_for_first_party_sdk_providers() {
+        // Raw models.dev leaves `api` empty for providers addressed via
+        // first-party SDKs; the reviewed overrides must supply base URLs.
+        let overrides = load_overrides();
+        let base = |id: &str| {
+            overrides
+                .providers
+                .iter()
+                .find(|p| p.id.as_str() == id)
+                .and_then(|p| p.api_base_url.clone())
+        };
+        assert_eq!(
+            base("anthropic").as_deref(),
+            Some("https://api.anthropic.com/v1")
+        );
+        assert_eq!(base("openai").as_deref(), Some("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn embedded_catalog_parses_and_has_no_empty_base_urls() {
+        let catalog = embedded_catalog();
+        assert_eq!(catalog.schema_version, CATALOG_SCHEMA_VERSION);
+        assert!(!catalog.providers.is_empty());
+        assert!(catalog.provider_str("xai").is_some());
+        for provider in &catalog.providers {
+            assert!(
+                !provider.api_base_url.is_empty(),
+                "provider {} has an empty api_base_url",
+                provider.id.as_str()
+            );
+        }
     }
 }

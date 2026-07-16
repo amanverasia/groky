@@ -45,6 +45,7 @@ struct RawCost {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ExcludedEntry {
     UnsupportedProtocol { provider_id: String, npm: String },
+    InvalidProviderId { provider_id: String },
 }
 
 fn protocol_from_npm(npm: &str) -> Protocol {
@@ -87,15 +88,11 @@ fn validate_cost(cost: &ModelCost, context: &str) -> Result<(), CatalogError> {
     Ok(())
 }
 
-fn validate_context_window(window: Option<u64>, context: &str) -> Result<(), CatalogError> {
-    if window == Some(0) {
-        return Err(CatalogError::InvalidField {
-            field: "context_window",
-            context: context.to_string(),
-            reason: "context window must be greater than zero",
-        });
-    }
-    Ok(())
+fn normalize_context_window(window: Option<u64>) -> Option<u64> {
+    // Real models.dev documents contain `context: 0` placeholders; a zero
+    // window is meaningless, so it is normalized to unknown rather than
+    // rejecting the whole document.
+    window.filter(|&w| w > 0)
 }
 
 /// Parses and normalizes a raw models.dev document.
@@ -140,7 +137,21 @@ pub fn normalize_models_dev(
             continue;
         }
 
-        let id = ProviderId::new(raw_id)?;
+        let id = match ProviderId::new(raw_id) {
+            Ok(id) => id,
+            Err(err) => {
+                // Real models.dev documents contain provider keys outside the
+                // validated ID alphabet (for example, `wafer.ai`); such
+                // providers are excluded locally instead of rejecting the
+                // whole document.
+                let provider_id = match err {
+                    CatalogError::InvalidProviderId { value, .. } => value,
+                    _ => String::new(),
+                };
+                excluded.push(ExcludedEntry::InvalidProviderId { provider_id });
+                continue;
+            }
+        };
         let name = if raw_provider.name.is_empty() {
             id.as_str().to_string()
         } else {
@@ -174,7 +185,7 @@ pub fn normalize_models_dev(
                 raw_model.name
             };
             check_string(&model_name, "model.name", &limits)?;
-            validate_context_window(raw_model.limit.context, &context)?;
+            let context_window = normalize_context_window(raw_model.limit.context);
             let cost = raw_model.cost.map(|c| ModelCost {
                 input_per_million: c.input,
                 output_per_million: c.output,
@@ -186,7 +197,7 @@ pub fn normalize_models_dev(
                 id: model_id,
                 name: model_name,
                 protocol,
-                context_window: raw_model.limit.context,
+                context_window,
                 reasoning: raw_model.reasoning,
                 cost,
             });
@@ -271,6 +282,28 @@ mod tests {
         let catalog = normalize_models_dev(raw, NormalizationLimits::default()).unwrap();
         let openai = catalog.provider_str("openai").unwrap();
         assert_eq!(openai.env_vars, ["OPENAI_API_KEY"]);
+    }
+
+    #[test]
+    fn treats_zero_context_window_as_unknown() {
+        let raw = br#"{"p":{"name":"P","api":"https://p.example/v1","env":[],"npm":"@ai-sdk/openai-compatible","models":{"m":{"name":"M","limit":{"context":0}}}}}"#;
+        let catalog = normalize_models_dev(raw, NormalizationLimits::default()).unwrap();
+        let model = catalog.provider_str("p").unwrap().model_str("m").unwrap();
+        assert_eq!(model.context_window, None);
+    }
+
+    #[test]
+    fn excludes_providers_with_invalid_ids() {
+        let raw = br#"{"wafer.ai":{"name":"Wafer","api":"https://w.example/v1","env":[],"npm":"@ai-sdk/openai-compatible","models":{}},"ok":{"name":"Ok","api":"https://ok.example/v1","env":[],"npm":"@ai-sdk/openai-compatible","models":{}}}"#;
+        let catalog = normalize_models_dev(raw, NormalizationLimits::default()).unwrap();
+        assert_eq!(
+            catalog
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ok"]
+        );
     }
 
     #[test]
