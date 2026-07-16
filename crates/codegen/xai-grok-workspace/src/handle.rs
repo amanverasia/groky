@@ -371,62 +371,6 @@ pub struct WorkspaceHandle {
     pub(crate) shared: Arc<WorkspaceShared>,
 }
 impl WorkspaceHandle {
-    /// `None` when not connected. Never hands out an owned
-    /// `ToolServer` — a clone-drop begins server teardown.
-    pub async fn trace_donation_reporter(
-        &self,
-        service_name: &str,
-    ) -> Option<(
-        xai_computer_hub_sdk::HubDonatingReporter,
-        xai_computer_hub_sdk::TraceDonationPump,
-    )> {
-        self.shared
-            .hub_handle
-            .lock()
-            .await
-            .as_ref()
-            .map(|hub| hub.server.trace_donation_reporter(service_name))
-    }
-    /// Post-connect entry point for the log export layer, the analogue of
-    /// [`Self::trace_donation_reporter`]. Returns `None` when not connected
-    /// (the layer stays inert). On
-    /// `Some`, yields a [`LogDonationSender`] to swap into the
-    /// already-installed inert `DonatingLogLayer` plus a drain handle.
-    /// Never hands out an owned `ToolServer` — a clone-drop begins server
-    /// teardown.
-    ///
-    /// [`LogDonationSender`]: xai_computer_hub_sdk::LogDonationSender
-    pub async fn log_donation_layer(
-        &self,
-        service_name: &str,
-    ) -> Option<(
-        xai_computer_hub_sdk::LogDonationSender,
-        xai_computer_hub_sdk::LogDonationPump,
-    )> {
-        self.shared
-            .hub_handle
-            .lock()
-            .await
-            .as_ref()
-            .map(|hub| hub.server.log_donation_layer(service_name))
-    }
-    /// Post-connect entry point for metric export, the analogue of
-    /// [`Self::trace_donation_reporter`]. Returns `None` when not connected
-    /// (no reporter is spawned). On
-    /// `Some`, spawns the periodic Prometheus-registry gather → OTLP →
-    /// export pump and yields a drain handle. Never hands out an owned
-    /// `ToolServer` — a clone-drop begins server teardown.
-    pub async fn metric_donation_reporter(
-        &self,
-        service_name: &str,
-    ) -> Option<xai_computer_hub_sdk::MetricDonationPump> {
-        self.shared
-            .hub_handle
-            .lock()
-            .await
-            .as_ref()
-            .map(|hub| hub.server.metric_donation_reporter(service_name))
-    }
     /// Construct a handle with zero sessions.
     ///
     /// Sessions are created explicitly via [`Self::create_session`] or
@@ -4544,35 +4488,6 @@ pub(crate) mod tests {
             .await;
         let typed = drain_terminal_ok(stream).await;
         assert_bash_cco_terminal(&typed);
-    }
-    /// No connection ⇒ every export entry point returns `None`, so the
-    /// binary leaves the `DonatingLogLayer` inert and spawns no metric reporter.
-    /// This is the flag-free "activate only on connection" contract that log
-    /// and metric export share with the pre-existing `trace_donation_reporter`.
-    #[tokio::test]
-    async fn donation_entry_points_are_inert_without_a_hub() {
-        let handle = make_handle();
-        assert!(
-            handle
-                .trace_donation_reporter("prod_grok_workspace")
-                .await
-                .is_none(),
-            "trace export must stay inert without a connection"
-        );
-        assert!(
-            handle
-                .log_donation_layer("prod_grok_workspace")
-                .await
-                .is_none(),
-            "log export must stay inert without a connection"
-        );
-        assert!(
-            handle
-                .metric_donation_reporter("prod_grok_workspace")
-                .await
-                .is_none(),
-            "metric export must stay inert without a connection"
-        );
     }
     #[test]
     fn rewind_outcome_label_maps_each_variant() {

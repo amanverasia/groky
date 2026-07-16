@@ -95,16 +95,6 @@ define_methods! {
     ToolNotification => "tool.notification",
     /// Reply to a request/response hook, correlated back to the harness by `hook_id`.
     HookReply => "hook_reply",
-    /// Notification (no `id`, no response); rejects surface only in
-    /// hub metrics. Only hub-minted trace-ids are accepted.
-    TracesDonate => "traces.donate",
-    /// Notification (no `id`, no response); rejects surface only in hub
-    /// metrics. Donor service.name must be hub-allowlisted.
-    LogsDonate => "logs.donate",
-    /// Notification (no `id`, no response); rejects surface only in hub
-    /// metrics. Donor service.name must be hub-allowlisted. No envelope
-    /// `session_id` — metrics are process-aggregate.
-    MetricsDonate => "metrics.donate",
 
     // service → tool_server
     ToolCallRequest => "tool_call_request",
@@ -171,9 +161,6 @@ mod tests {
             Method::ToolCallProgress,
             Method::ToolNotification,
             Method::HookReply,
-            Method::TracesDonate,
-            Method::LogsDonate,
-            Method::MetricsDonate,
             Method::ToolCallRequest,
             Method::ToolsChanged,
             Method::SubscribeAck,
@@ -195,6 +182,16 @@ mod tests {
     fn from_wire_str_returns_none_for_unknown() {
         assert_eq!(Method::from_wire_str("not_a_method"), None);
         assert_eq!(Method::from_wire_str(""), None);
+    }
+
+    #[test]
+    fn telemetry_donation_methods_are_not_in_the_protocol() {
+        for wire in ["traces.donate", "logs.donate", "metrics.donate"] {
+            assert!(
+                Method::from_wire_str(wire).is_none(),
+                "donation method survived: {wire}"
+            );
+        }
     }
 
     #[test]
