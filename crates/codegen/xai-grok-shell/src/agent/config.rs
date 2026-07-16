@@ -3441,6 +3441,19 @@ pub enum CredentialPolicy {
     /// No credential is attached (unauthenticated providers).
     None,
 }
+/// Secret-free display/pricing metadata carried by catalog provider entries.
+/// Never contains credentials, env var values, or credential origins.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProviderModelMeta {
+    /// Human-readable provider display name (e.g. "OpenAI").
+    pub provider_name: String,
+    /// Input token cost per million (USD), when the catalog knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_million: Option<f64>,
+    /// Output token cost per million (USD), when the catalog knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_million: Option<f64>,
+}
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
 /// Routing reads fields, not provenance.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3456,6 +3469,9 @@ pub struct ModelEntry {
     /// Credential resolution policy; defaults to the legacy xAI order.
     #[serde(default)]
     pub credential_policy: CredentialPolicy,
+    /// Provider display/pricing metadata for catalog entries; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_meta: Option<ProviderModelMeta>,
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
@@ -3469,6 +3485,7 @@ impl ModelEntry {
             api_base_url: None,
             provider_id: None,
             credential_policy: CredentialPolicy::default(),
+            provider_meta: None,
         }
     }
     pub fn info(&self) -> &ModelInfo {
@@ -3482,6 +3499,7 @@ impl ModelEntry {
             api_base_url: entry.api_base_url.clone(),
             provider_id: None,
             credential_policy: CredentialPolicy::default(),
+            provider_meta: None,
         }
     }
     /// The model's own (BYOK) credential: a non-empty `api_key`, else the first
@@ -3915,11 +3933,17 @@ pub fn resolve_credentials_with(
                         .and_then(|p| stored_provider_key(p.as_str()).map(|k| (k, "stored")))
                 })
                 .or_else(|| {
-                    model
-                        .provider_id
-                        .as_ref()
-                        .and_then(catalog_provider_env_credential)
-                        .map(|k| (k, "environment"))
+                    // Entry env_key (catalog provider env names, including any
+                    // `[provider.<id>] env_key` override applied at composition
+                    // time) replaces the embedded-catalog fallback entirely.
+                    match model.env_key.as_ref().filter(|keys| !keys.is_empty()) {
+                        Some(keys) => keys.resolve_value(),
+                        None => model
+                            .provider_id
+                            .as_ref()
+                            .and_then(catalog_provider_env_credential),
+                    }
+                    .map(|k| (k, "environment"))
                 })
                 .or_else(|| model.own_credential().map(|k| (k, "model")))
                 .map_or((None, "none"), |(k, origin)| (Some(k), origin));
@@ -4208,6 +4232,7 @@ pub fn resolve_aux_model_sampling_config(
             api_base_url: None,
             provider_id: None,
             credential_policy: Default::default(),
+            provider_meta: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
@@ -4433,6 +4458,7 @@ fn resolve_hidden_default_web_search_sampling_config(
         api_base_url: None,
         provider_id: None,
         credential_policy: Default::default(),
+        provider_meta: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
     sampling_config_for_model(
@@ -4519,6 +4545,39 @@ pub fn to_acp_model_info(
                         REASONING_EFFORTS_META_KEY.to_string(),
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
                     );
+                }
+                // Provider context for catalog entries. Secret-free by
+                // construction: ids, display name, and public pricing only —
+                // never keys, env var values, or credential origins.
+                if let Some(provider_id) = &model.provider_id {
+                    map.insert(
+                        "providerId".to_string(),
+                        serde_json::Value::String(provider_id.as_str().to_owned()),
+                    );
+                }
+                if let Some(provider_meta) = &model.provider_meta {
+                    map.insert(
+                        "providerName".to_string(),
+                        serde_json::Value::String(provider_meta.provider_name.clone()),
+                    );
+                    if let Some(cost) = provider_meta
+                        .input_cost_per_million
+                        .and_then(serde_json::Number::from_f64)
+                    {
+                        map.insert(
+                            "inputCostPerMillion".to_string(),
+                            serde_json::Value::Number(cost),
+                        );
+                    }
+                    if let Some(cost) = provider_meta
+                        .output_cost_per_million
+                        .and_then(serde_json::Number::from_f64)
+                    {
+                        map.insert(
+                            "outputCostPerMillion".to_string(),
+                            serde_json::Value::Number(cost),
+                        );
+                    }
                 }
                 if map.is_empty() { None } else { Some(map) }
             };
@@ -5111,6 +5170,7 @@ reasoning_effort = "low"
             api_base_url: api_base_url.map(|s| s.to_string()),
             provider_id: None,
             credential_policy: Default::default(),
+            provider_meta: None,
         }
     }
     /// The effective-model RE-support lookup must use the model ACTUALLY used:
@@ -9766,6 +9826,7 @@ default = "grok-4.5"
             api_base_url: None,
             provider_id: None,
             credential_policy: Default::default(),
+            provider_meta: None,
         }
     }
     #[test]

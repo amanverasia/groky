@@ -30,6 +30,14 @@ pub fn bootstrap(
     init_process(&cfg, auth_manager);
     let models_manager = ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?;
 
+    // Configured-provider catalog: constructed from the embedded snapshot plus
+    // `$GROK_HOME/provider_catalog.json` (24h freshness) — no network here.
+    models_manager.set_provider_catalog(Arc::new(
+        crate::agent::provider_catalog::ProviderCatalogAdapter::from_grok_home(
+            crate::util::grok_home::grok_home(),
+        ),
+    ));
+
     // Refresh on every auth refresh — the FSEvents watcher can silently die after
     // macOS sleep, stranding the catalog on bundled defaults.
     models_manager.start_auth_refresh_watcher(auth_manager.refresh_notifier());

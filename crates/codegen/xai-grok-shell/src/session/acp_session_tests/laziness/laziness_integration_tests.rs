@@ -41,6 +41,7 @@ fn detector_entry(
         api_base_url: None,
         provider_id: None,
         credential_policy: Default::default(),
+        provider_meta: None,
     }
 }
 
