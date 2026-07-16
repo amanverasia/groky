@@ -360,6 +360,10 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
 ///   `[model.*]`/`[models]` hot-reload, `models_cache.json` external write,
 ///   auth change, response-header etag refresh). Every connected client's
 ///   model picker must refresh, not just the most recently active one.
+/// - `x.ai/providers/update` — provider key/availability state changed
+///   (`x.ai/providers/store_key`/`clear_key`, background catalog refresh).
+///   Session-agnostic like `x.ai/models/update`; every client's provider
+///   picker must refresh. The payload is secret-free by construction.
 /// - `x.ai/mcp/servers_updated` — the MCP catalog resolved/changed (managed
 ///   connectors fetched in the background after `initialize`). Deliberately
 ///   session-agnostic on the wire (no `sessionId`, see
@@ -385,6 +389,7 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
         Some(
             "x.ai/sessions/changed"
                 | "x.ai/models/update"
+                | "x.ai/providers/update"
                 | "x.ai/mcp/servers_updated"
                 | "x.ai/announcements/update"
         )

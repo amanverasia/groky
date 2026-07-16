@@ -80,6 +80,8 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::ContextInfo => ok_end_turn(0, None),
+            // Pager-rendered surface; nothing to do host-side.
+            BuiltinAction::Providers => ok_end_turn(0, None),
             BuiltinAction::HooksTrust => {
                 let msg = match Self::do_hooks_trust_project(&self.session_info.cwd) {
                     Ok(root) => {

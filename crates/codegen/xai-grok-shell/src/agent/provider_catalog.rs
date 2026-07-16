@@ -164,6 +164,8 @@ pub struct ProviderCatalogAdapter {
     manager: xai_grok_catalog::CatalogManager,
     grok_home: PathBuf,
     session_keys: parking_lot::RwLock<std::collections::HashMap<String, String>>,
+    /// Coalesces background catalog refreshes: only one may be in flight.
+    refresh_in_flight: std::sync::atomic::AtomicBool,
 }
 
 impl ProviderCatalogAdapter {
@@ -173,6 +175,7 @@ impl ProviderCatalogAdapter {
             manager,
             grok_home,
             session_keys: parking_lot::RwLock::new(std::collections::HashMap::new()),
+            refresh_in_flight: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -192,6 +195,38 @@ impl ProviderCatalogAdapter {
     /// Current immutable catalog snapshot.
     pub fn snapshot(&self) -> Arc<CatalogSnapshot> {
         self.manager.snapshot()
+    }
+
+    /// Attempts to claim the single background-refresh slot. Returns `true`
+    /// when the caller won and must eventually call [`Self::finish_refresh`].
+    pub fn try_begin_refresh(&self) -> bool {
+        self.refresh_in_flight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Releases the background-refresh slot claimed by
+    /// [`Self::try_begin_refresh`].
+    pub fn finish_refresh(&self) {
+        self.refresh_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a background catalog refresh is currently in flight.
+    pub fn refresh_in_flight(&self) -> bool {
+        self.refresh_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Unconditionally performs one bounded, conditional HTTP catalog
+    /// refresh. Callers coordinate coalescing via [`Self::try_begin_refresh`].
+    pub async fn refresh(&self) -> Result<xai_grok_catalog::RefreshOutcome, CatalogError> {
+        self.manager.refresh().await
     }
 
     /// Records a session-scoped provider API key (highest precedence).

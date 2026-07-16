@@ -272,8 +272,42 @@ impl ModelsManager {
         Ok(mgr)
     }
 
-    pub(crate) fn set_gateway(&self, gateway: xai_acp_lib::AcpAgentGatewaySender) {
+    /// Attach the client gateway. `pub` (not `pub(crate)`) so integration
+    /// tests can capture broadcast notifications through a bare sender.
+    pub fn set_gateway(&self, gateway: xai_acp_lib::AcpAgentGatewaySender) {
         *self.inner.gateway.write() = Some(gateway);
+    }
+
+    /// The attached configured-provider catalog adapter, if any.
+    pub fn provider_catalog(
+        &self,
+    ) -> Option<Arc<crate::agent::provider_catalog::ProviderCatalogAdapter>> {
+        self.inner.provider_catalog.read().clone()
+    }
+
+    /// Clone of the current config (provider surface classification needs
+    /// `[provider.<id>]` overrides).
+    pub fn config_snapshot(&self) -> config::Config {
+        self.inner.cfg.read().clone()
+    }
+
+    /// Broadcast an extension notification to connected clients. No-op when
+    /// no gateway is attached (tests, pre-init). Payload must be secret-free.
+    pub fn broadcast_ext_notification<T: serde::Serialize>(&self, method: &str, params: &T) {
+        if let Some(ref gw) = *self.inner.gateway.read()
+            && let Ok(params) = serde_json::value::to_raw_value(params)
+        {
+            gw.forward_fire_and_forget(acp::ExtNotification::new(method.to_owned(), params.into()));
+        }
+    }
+
+    /// Recompose the model catalog from the attached provider adapter (after
+    /// a credential or catalog change) and notify clients. No-op when no
+    /// adapter is attached.
+    pub fn rebuild_provider_models(&self) {
+        if let Some(adapter) = self.provider_catalog() {
+            self.set_provider_catalog(adapter);
+        }
     }
 
     /// Swap config, rebuild catalog, and reselect the model.
