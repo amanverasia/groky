@@ -1455,11 +1455,11 @@ impl MvpAgent {
         } else {
             tracing::debug!("Relay sync: DISABLED (not in TUI mode)");
         }
-        if cfg.telemetry.trace_upload == Some(false) {
-            tracing::info!(
-                enabled = false, reason = "feature_off", "trace_upload_status"
-            );
-        }
+        tracing::info!(
+            enabled = false,
+            reason = "telemetry_removed",
+            "trace_upload_status"
+        );
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let activity = crate::agent::activity::AgentActivity::default();
         let mut subagent_coordinator = crate::agent::subagent::SubagentCoordinator::new();

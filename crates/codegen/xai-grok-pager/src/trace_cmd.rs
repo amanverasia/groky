@@ -167,7 +167,7 @@ struct TraceConfigSnapshot {
 fn build_trace_config_snapshot(agent_config: &AgentConfig) -> TraceConfigSnapshot {
     TraceConfigSnapshot {
         trace_upload_enabled: agent_config.is_trace_upload_enabled(),
-        telemetry_trace_upload: agent_config.telemetry.trace_upload,
+        telemetry_trace_upload: None,
         custom_upload_url: agent_config.endpoints.trace_upload_url.is_some(),
         bucket_url_source: match agent_config.endpoints.resolve_trace_bucket_url() {
             Some(resolved) => format!("{}", resolved.source),

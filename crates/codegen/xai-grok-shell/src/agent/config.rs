@@ -2079,20 +2079,7 @@ impl Config {
         Resolved::new(TelemetryMode::Disabled, ConfigSource::Default)
     }
     pub(crate) fn resolve_trace_upload(&self) -> Resolved<bool> {
-        let mode = self.resolve_telemetry_mode();
-        let ff = if mode.value.is_disabled() {
-            None
-        } else {
-            self.remote_settings
-                .as_ref()
-                .and_then(|s| s.trace_upload_enabled)
-        };
-        BoolFlag::env("GROK_TELEMETRY_TRACE_UPLOAD")
-            .requirement(self.requirements.trace_upload.pinned())
-            .config(self.telemetry.trace_upload)
-            .feature_flag(ff)
-            .default(mode.value.is_enabled())
-            .resolve()
+        Resolved::new(false, ConfigSource::Default)
     }
     /// Resolve jemalloc heap-profile config from stored remote settings + gates.
     pub fn resolve_jemalloc_heap_profile(
@@ -2137,7 +2124,7 @@ impl Config {
             .pinned(), "in_requirement_src" : req.source().map(| s | s.to_string()),
             "in_env_trace_upload" : std::env::var("GROK_TELEMETRY_TRACE_UPLOAD").ok(),
             "in_env_telemetry_enabled" : std::env::var("GROK_TELEMETRY_ENABLED").ok(),
-            "in_cfg_telemetry_trace_upload" : self.telemetry.trace_upload,
+            "in_cfg_telemetry_trace_upload" : serde_json::Value::Null,
             "in_cfg_features_telemetry" : self.features.telemetry.map(| m | m
             .to_string()), "in_remote_trace_upload_enabled" : self.remote_settings
             .as_ref().and_then(| s | s.trace_upload_enabled), "has_remote_settings" :
