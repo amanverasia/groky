@@ -984,6 +984,12 @@ pub struct Config {
     /// Warnings from `[model.*]` parsing; surfaced by `grok inspect`.
     #[serde(skip)]
     pub model_override_warnings: Vec<super::config_model_override_parse::ModelOverrideWarning>,
+    /// `[provider.*]` static overrides from config.toml.
+    #[serde(skip)]
+    pub config_providers: IndexMap<String, ConfigProviderOverride>,
+    /// Warnings from `[provider.*]` parsing.
+    #[serde(skip)]
+    pub provider_override_warnings: Vec<super::config_model_override_parse::ModelOverrideWarning>,
     pub grok_com_config: GrokComConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<toml::Value>,
@@ -1410,6 +1416,8 @@ impl Default for Config {
             auto_mode: AutoModeConfig::default(),
             config_models: IndexMap::new(),
             model_override_warnings: Vec::new(),
+            config_providers: IndexMap::new(),
+            provider_override_warnings: Vec::new(),
             grok_com_config: GrokComConfig::default(),
             shortcuts: None,
             hints: None,
@@ -1551,13 +1559,19 @@ impl Config {
             warnings: model_override_warnings,
         } = super::config_model_override_parse::parse_model_overrides(raw_config);
         super::config_model_override_parse::log_model_override_warnings(&model_override_warnings);
+        let super::config_model_override_parse::ParsedProviderOverrides {
+            providers: config_providers,
+            warnings: provider_override_warnings,
+        } = super::config_model_override_parse::parse_provider_overrides(raw_config);
         let mut base = toml::Value::try_from(Self::default()).map_err(|e| e.to_string())?;
         if let toml::Value::Table(ref mut t) = base {
             t.remove("model");
+            t.remove("provider");
         }
         let mut raw_without_model_sections = raw_config.clone();
         if let toml::Value::Table(ref mut t) = raw_without_model_sections {
             t.remove("model");
+            t.remove("provider");
         }
         crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
         let (mut config, user_unused) =
@@ -1570,6 +1584,8 @@ impl Config {
         }
         config.config_models = config_models;
         config.model_override_warnings = model_override_warnings;
+        config.config_providers = config_providers;
+        config.provider_override_warnings = provider_override_warnings;
         if config.grok_com_config.oidc.is_none() {
             config.grok_com_config.oidc = OidcAuthConfig::from_env();
         }
@@ -3214,6 +3230,24 @@ impl ConfigModelOverride {
         entry
     }
 }
+/// A `[provider.<id>]` entry from config.toml, parsed directly from raw TOML
+/// (bypassing deep merge), resiliently like `[model.<id>]`: a bad field is
+/// warned about and skipped, never dropping the provider.
+///
+/// Static fields only — discovery/endpoint-probing fields are out of scope
+/// for this struct.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct ConfigProviderOverride {
+    /// Display-name override for the provider.
+    pub name: Option<String>,
+    /// Base URL override; maps onto the catalog provider's `api_base_url`.
+    pub base_url: Option<String>,
+    /// Env var name(s) holding the provider API key — string or array.
+    pub env_key: Option<EnvKeys>,
+    /// Whether the provider allows unauthenticated use.
+    pub unauthenticated: Option<bool>,
+}
 /// Shared model metadata — the common fields across all model sources.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelInfo {
@@ -3387,6 +3421,26 @@ impl ModelInfo {
         !self.hidden && (is_session_auth || self.supported_in_api)
     }
 }
+/// How credentials are resolved for a [`ModelEntry`].
+///
+/// Defaults to [`CredentialPolicy::XaiLegacy`] so every pre-existing entry
+/// (including old `models_cache.json` snapshots) keeps the current xAI
+/// resolution order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPolicy {
+    /// Current xAI order: model api_key/env_key > session token > XAI_API_KEY.
+    #[default]
+    XaiLegacy,
+    /// Catalog provider key: session provider key > stored provider key >
+    /// catalog env vars > model api_key/env_key. Never the xAI session token
+    /// or `XAI_API_KEY`.
+    ProviderApiKey,
+    /// Model-supplied api_key/env_key only; no fallbacks.
+    ExplicitModel,
+    /// No credential is attached (unauthenticated providers).
+    None,
+}
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
 /// Routing reads fields, not provenance.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3396,6 +3450,12 @@ pub struct ModelEntry {
     pub env_key: Option<EnvKeys>,
     /// When set, `base_url` is used for session auth, `api_base_url` for API-key auth.
     pub api_base_url: Option<String>,
+    /// Catalog provider this entry came from; `None` for xAI/config entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<xai_grok_catalog::ProviderId>,
+    /// Credential resolution policy; defaults to the legacy xAI order.
+    #[serde(default)]
+    pub credential_policy: CredentialPolicy,
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
@@ -3407,6 +3467,8 @@ impl ModelEntry {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: CredentialPolicy::default(),
         }
     }
     pub fn info(&self) -> &ModelInfo {
@@ -3418,6 +3480,8 @@ impl ModelEntry {
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             api_base_url: entry.api_base_url.clone(),
+            provider_id: None,
+            credential_policy: CredentialPolicy::default(),
         }
     }
     /// The model's own (BYOK) credential: a non-empty `api_key`, else the first
@@ -4042,6 +4106,8 @@ pub fn resolve_aux_model_sampling_config(
             api_key: Some(bearer),
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
@@ -4265,6 +4331,8 @@ fn resolve_hidden_default_web_search_sampling_config(
         api_key: None,
         env_key: None,
         api_base_url: None,
+        provider_id: None,
+        credential_policy: Default::default(),
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
     sampling_config_for_model(
@@ -4941,6 +5009,8 @@ reasoning_effort = "low"
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
             api_base_url: api_base_url.map(|s| s.to_string()),
+            provider_id: None,
+            credential_policy: Default::default(),
         }
     }
     /// The effective-model RE-support lookup must use the model ACTUALLY used:
@@ -9594,6 +9664,8 @@ default = "grok-4.5"
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
         }
     }
     #[test]

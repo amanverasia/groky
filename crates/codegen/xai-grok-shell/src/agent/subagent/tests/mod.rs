@@ -3087,7 +3087,9 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
         api_key: None,
         env_key: None,
         api_base_url: None,
-    }
+    provider_id: None,
+credential_policy: Default::default(),
+}
 }
 fn byok_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
     crate::agent::config::ModelEntry {
