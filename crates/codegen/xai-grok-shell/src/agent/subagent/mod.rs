@@ -20,12 +20,6 @@ use crate::session::{
 };
 use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
-};
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use agent_client_protocol as acp;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -288,12 +282,6 @@ pub(crate) struct SubagentSpawnContext {
     pub file_tool_overrides: Option<Vec<xai_grok_tools::registry::types::ToolConfig>>,
     /// Parent session's agent config snapshot.
     pub agent_config: Option<crate::agent::config::Config>,
-    /// GCS bucket URL for trace uploads.
-    /// For proxy upload mode this is a placeholder — the actual bucket
-    /// is determined by the proxy from user ACLs.
-    pub gcs_bucket_url: Option<String>,
-    /// GCS upload method (direct or proxy).
-    pub gcs_upload_method: Option<crate::session::repo_changes::UploadMethod>,
     pub hook_registry: Option<std::sync::Arc<xai_grok_hooks::discovery::HookRegistry>>,
     #[expect(
         dead_code,
@@ -351,9 +339,6 @@ pub(crate) struct SubagentSpawnContext {
     /// Shared set of IDs delivered via auto-wake synthetic prompts.
     pub auto_wake_delivered:
         Option<xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds>,
-    /// Channel for requesting trace uploads for synthetic auto-wake turns.
-    pub synthetic_trace_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     /// Resolved name of the `BackgroundTaskAction` tool in the parent's toolset.
     pub task_output_tool_name: String,
     /// Whether auto-wake is enabled. When `false`, subagent completions
@@ -561,11 +546,6 @@ pub(crate) struct SubagentCoordinator {
     /// Whether the model's turn is currently active. Shared with the session
     /// via `Arc` so it can be toggled at turn boundaries from `handle_prompt`.
     is_turn_active: Arc<std::sync::atomic::AtomicBool>,
-    /// Sender for synthetic turn trace requests. Set once by
-    /// `start_subagent_coordinator`; read on each turn to propagate
-    /// to session `ToolContext` and notification bridge.
-    pub(crate) synthetic_trace_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     /// Gauge of initializing + running subagents (`pending.len() +
     /// active.len()`), kept in sync by [`Self::sync_running_gauge`]. Read by
     /// [`crate::agent::activity::AgentActivity::is_busy`] to defer leader
@@ -1984,9 +1964,6 @@ fn inject_subagent_completed_prompt(
     auto_wake_delivered: &Option<xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds>,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: &str,
-    synthetic_trace_tx: &Option<
-        mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
-    >,
 ) {
     let Some(cmd_tx) = parent_cmd_tx else {
         return;
@@ -2010,22 +1987,12 @@ fn inject_subagent_completed_prompt(
     );
     let wrapped = xai_grok_tools::reminders::wrap_reminder(&message);
     let prompt_id = format!("subagent-completed-{subagent_id}");
-    let before_rx = if synthetic_trace_tx.is_some() {
-        let (before_tx, before_rx) = tokio::sync::oneshot::channel();
-        let _ = cmd_tx.send(SessionCommand::CopyFile {
-            respond_to: before_tx,
-        });
-        Some(before_rx)
-    } else {
-        None
-    };
-    let (respond_to, completion_rx) = tokio::sync::oneshot::channel();
+    let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
     let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(wrapped))];
     let _ = cmd_tx.send(SessionCommand::Prompt {
-        prompt_id: prompt_id.clone(),
+        prompt_id,
         prompt_blocks,
         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-        artifact_upload_ctx: None,
         client_identifier: None,
         screen_mode: None,
         verbatim: true,
@@ -2036,15 +2003,6 @@ fn inject_subagent_completed_prompt(
         persist_ack: None,
         parsed_prompt_tx: None,
     });
-    if let Some(trace_tx) = synthetic_trace_tx {
-        let _ = trace_tx.send(crate::upload::turn::SyntheticTurnTraceRequest {
-            session_id: acp::SessionId::new(request.parent_session_id.clone()),
-            prompt_id,
-            completion_rx,
-            before_session_copy_rx: before_rx
-                .expect("before_rx set when synthetic_trace_tx is Some"),
-        });
-    }
 }
 /// Post-`insert_pending`, pre-`SubagentSpawned` failure: just send via oneshot;
 /// `PendingGuard::drop` handles the queue side effects.
@@ -2121,7 +2079,6 @@ fn fail_subagent(
     parent_session_id: &str,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     duration_ms: u64,
-    gcs_ctx: &GcsUploadContext,
 ) {
     let result = SubagentResult {
         success: false,
@@ -2131,7 +2088,7 @@ fn fail_subagent(
         duration_ms,
         ..Default::default()
     };
-    update_subagent_meta_completed(subagent_meta_dir, &result, gcs_ctx);
+    update_subagent_meta_completed(subagent_meta_dir, &result);
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2169,7 +2126,6 @@ async fn cancel_pending_subagent_at_promote(
     worktree_path: Option<&Path>,
     worktree_freshly_created: bool,
     duration_ms: u64,
-    gcs_ctx: &GcsUploadContext,
 ) {
     let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
     if worktree_freshly_created
@@ -2190,7 +2146,7 @@ async fn cancel_pending_subagent_at_promote(
         duration_ms,
         ..Default::default()
     };
-    update_subagent_meta_completed(subagent_meta_dir, &result, gcs_ctx);
+    update_subagent_meta_completed(subagent_meta_dir, &result);
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2381,8 +2337,7 @@ mod progress_publisher_tests {
 }
 /// Metadata stored as `meta.json` in the child session directory.
 /// Links the child session back to its parent.
-///
-/// For the GCS-persisted artifact (`subagent.json`), see [`SubagentSessionMetadata`].
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SubagentMeta {
     pub subagent_id: String,
@@ -2437,121 +2392,6 @@ pub(crate) struct SubagentMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
 }
-/// Canonical subagent metadata for GCS persistence (`subagent.json`).
-///
-/// Contains the full subagent identity, provenance, and execution state.
-/// Uploaded to `{session_id}/subagent.json` in GCS and optionally mirrored
-/// locally. Schema is versioned for forward compatibility.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubagentSessionMetadata {
-    pub schema_version: u32,
-    pub session_id: String,
-    pub session_kind: String,
-    pub subagent_id: String,
-    pub child_session_id: String,
-    pub parent_session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_prompt_id: Option<String>,
-    pub subagent_type: String,
-    /// Human-readable spawn description: the task tool's `description`
-    /// argument, or the fixed role label for harness-spawned goal subagents
-    /// ("goal plan writer", "goal achievement skeptic", ...). All goal roles
-    /// share `subagent_type = "general-purpose"`, so this is what identifies
-    /// them in the artifact.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub persona: Option<String>,
-    #[serde(default)]
-    pub context_normalized: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capability_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub worktree_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub isolation_mode: Option<String>,
-    #[serde(default)]
-    pub depth: u32,
-    pub started_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<String>,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turns: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fork_copy_error: Option<String>,
-    /// ID of the source subagent this session was resumed from (`resume_from`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resumed_from: Option<String>,
-}
-impl SubagentSessionMetadata {
-    /// Current schema version.
-    pub const SCHEMA_VERSION: u32 = 1;
-    /// Build from a `SubagentMeta` + additional runtime context.
-    pub fn from_meta(
-        meta: &SubagentMeta,
-        model_id: Option<&str>,
-        cwd: Option<&str>,
-        worktree_path: Option<&str>,
-        isolation_mode: Option<&str>,
-        capability_mode: Option<&str>,
-        reasoning_effort: Option<&str>,
-        role: Option<&str>,
-        parent_prompt_id: Option<&str>,
-        depth: u32,
-    ) -> Self {
-        let session_kind = if meta.resumed_from.is_some() {
-            "subagent_resume"
-        } else {
-            "subagent"
-        };
-        Self {
-            schema_version: Self::SCHEMA_VERSION,
-            session_id: meta.child_session_id.clone(),
-            session_kind: session_kind.to_string(),
-            subagent_id: meta.subagent_id.clone(),
-            child_session_id: meta.child_session_id.clone(),
-            parent_session_id: meta.parent_session_id.clone(),
-            parent_prompt_id: parent_prompt_id.map(str::to_string),
-            subagent_type: meta.subagent_type.clone(),
-            description: meta.description.clone(),
-            role: role.map(str::to_string),
-            persona: meta.persona.clone(),
-            context_normalized: meta.context_normalized,
-            capability_mode: capability_mode.map(str::to_string),
-            reasoning_effort: reasoning_effort.map(str::to_string),
-            model_id: model_id.map(str::to_string),
-            cwd: cwd.map(str::to_string),
-            worktree_path: worktree_path.map(str::to_string),
-            isolation_mode: isolation_mode.map(str::to_string),
-            depth,
-            started_at: meta.started_at.to_rfc3339(),
-            completed_at: meta.completed_at.map(|t| t.to_rfc3339()),
-            status: meta.status.clone(),
-            duration_ms: meta.duration_ms,
-            tool_calls: meta.tool_calls,
-            turns: meta.turns,
-            error: meta.error.clone(),
-            fork_copy_error: meta.fork_copy_error.clone(),
-            resumed_from: meta.resumed_from.clone(),
-        }
-    }
-}
 /// Write `meta.json`. Returns `true` on success so callers on the resume-pointer
 /// path can gate worktree disposal on a durable write.
 fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
@@ -2572,22 +2412,6 @@ fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
         return false;
     }
     true
-}
-/// Extra runtime context for GCS artifact upload. `SubagentMeta` doesn't
-/// persist these fields, so they're carried from the spawn site.
-#[derive(Clone)]
-struct GcsUploadContext {
-    bucket_url: Option<String>,
-    upload_method: Option<crate::session::repo_changes::UploadMethod>,
-    model_id: Option<String>,
-    cwd: Option<String>,
-    isolation_mode: Option<String>,
-    capability_mode: Option<String>,
-    reasoning_effort: Option<String>,
-    role_name: Option<String>,
-    parent_prompt_id: Option<String>,
-    depth: u32,
-    auth_manager: std::sync::Arc<crate::auth::AuthManager>,
 }
 /// Persist the durable worktree `snapshot_ref` into the on-disk `meta.json`
 /// after completion, so `resumable_source_for` can rehydrate the disposed
@@ -2622,7 +2446,7 @@ fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &st
     meta.status = status.to_string();
     write_subagent_meta(dir, &meta)
 }
-fn update_subagent_meta_completed(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
+fn update_subagent_meta_completed(dir: &Path, result: &SubagentResult) {
     let meta_path = dir.join("meta.json");
     if let Ok(data) = std::fs::read_to_string(&meta_path)
         && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)
@@ -2634,26 +2458,6 @@ fn update_subagent_meta_completed(dir: &Path, result: &SubagentResult, gcs_ctx: 
         meta.turns = Some(result.turns);
         meta.error = result.error.clone();
         write_subagent_meta(dir, &meta);
-        if let (Some(bucket), Some(method)) = (&gcs_ctx.bucket_url, &gcs_ctx.upload_method) {
-            let gcs_meta = SubagentSessionMetadata::from_meta(
-                &meta,
-                gcs_ctx.model_id.as_deref(),
-                gcs_ctx.cwd.as_deref(),
-                result.worktree_path.as_deref(),
-                gcs_ctx.isolation_mode.as_deref(),
-                gcs_ctx.capability_mode.as_deref(),
-                gcs_ctx.reasoning_effort.as_deref(),
-                gcs_ctx.role_name.as_deref(),
-                gcs_ctx.parent_prompt_id.as_deref(),
-                gcs_ctx.depth,
-            );
-            let bucket = bucket.clone();
-            let method = method.clone();
-            let auth_for_spawn = gcs_ctx.auth_manager.clone();
-            tokio::spawn(async move {
-                upload_subagent_metadata(&gcs_meta, &bucket, method, auth_for_spawn).await;
-            });
-        }
     }
 }
 const ORPHAN_RECONCILE_REASON: &str = "interrupted by process restart";

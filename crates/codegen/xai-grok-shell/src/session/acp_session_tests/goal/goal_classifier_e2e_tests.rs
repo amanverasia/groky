@@ -1676,8 +1676,6 @@ async fn goal_classifier_nudge_suppresses_subsequent_goal_summary() {
                         "seed".to_string(),
                     ))],
                     prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                    trace_gcs_config: None,
-                    artifact_tracker: None,
                     client_identifier: None,
                     screen_mode: None,
                     verbatim: true,

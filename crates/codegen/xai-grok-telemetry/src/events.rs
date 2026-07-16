@@ -1627,22 +1627,6 @@ telemetry_event!(
     crate::session_metrics::DoomLoopRecovery,
     "doom_loop_recovery"
 );
-telemetry_event!(
-    crate::session_metrics::TraceUploadAttempted,
-    "trace_upload_attempted"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadSucceeded,
-    "trace_upload_succeeded"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadSkipped,
-    "trace_upload_skipped"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadFailed,
-    "trace_upload_failed"
-);
 
 // Memory subsystem (structs in memory_telemetry)
 telemetry_event!(

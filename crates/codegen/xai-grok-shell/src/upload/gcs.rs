@@ -1,15 +1,14 @@
 //! Shell-side adapter that threads the live `AuthManager` through to the
 //! `StorageClient` constructed inside `xai_file_utils::gcs::*` helpers.
 //!
-//! Background: the data-collector helpers (`upload_bytes`,
-//! `upload_file`, `upload_stream`, `upload_bytes_signed`)
-//! build a `StorageClient` per call. Without a `StorageConfig` impl that
-//! provides `proxy_credentials` / `proxy_attribution`, that client falls
-//! back to a static `user_token` snapshot baked into `TraceExportConfig`
-//! at construction time and emits no attribution event on 401. That
-//! snapshot becomes stale on rotation and is empty during the 5-minute
-//! pre-refresh buffer window in `AuthManager`, both of which manifest
-//! as `POST /v1/storage` 401s at the proxy.
+//! Background: the storage helpers (`upload_bytes`, `upload_file`,
+//! `upload_stream`, `upload_bytes_signed`) build a `StorageClient` per call.
+//! Without a `StorageConfig` impl that provides `proxy_credentials` /
+//! `proxy_attribution`, that client falls back to a static `user_token`
+//! snapshot baked into `TraceExportConfig` at construction time and emits no
+//! attribution event on 401. That snapshot becomes stale on rotation and is
+//! empty during the 5-minute pre-refresh buffer window in `AuthManager`, both
+//! of which manifest as `POST /v1/storage` 401s at the proxy.
 //!
 //! [`TraceExportConfigWithAuth`] wraps a bare `TraceExportConfig` plus an
 //! optional `Arc<AuthManager>` and implements `StorageConfig` such that, when
@@ -21,9 +20,9 @@
 //!   2. A `StorageClientAttributionBridge` that emits the
 //!      `auth_401_attribution` event on 401 with the right consumer tag.
 //!
-//! Use [`WithAuth::with_auth`] at every shell-side upload call site that
-//! has an `AuthManager` in scope, immediately before passing the config
-//! to an `xai_file_utils::gcs::*` helper.
+//! Retained for non-telemetry product storage (e.g. the session-search
+//! remote index sync); the trace/diagnostic upload pipeline that used to
+//! live alongside it has been removed.
 use crate::auth::AuthManager;
 use crate::auth::credential_provider::{
     ShellAuthCredentialProvider, StorageClientAttributionBridge,
@@ -110,75 +109,5 @@ pub(crate) trait WithAuth {
 impl WithAuth for TraceExportConfig {
     fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> TraceExportConfigWithAuth {
         TraceExportConfigWithAuth::new(self.clone(), auth_manager)
-    }
-}
-/// Default GCS bucket for session trace uploads. Override at runtime with
-/// `GROK_TELEMETRY_GCS_BUCKET`; `None` disables trace uploads until a bucket
-/// is configured.
-pub(crate) const SESSION_TRACES_BUCKET: Option<&str> =
-    option_env!("GROK_SESSION_TRACES_BUCKET_DEFAULT");
-/// Build the GCS console browse URL for the per-turn unified log.
-///
-/// The log is already uploaded by `complete_prompt_trace` at
-/// `{session_id}/turn_{N}/unified_log.jsonl`. This just computes
-/// the URL so feedback Slack messages can link to it.
-///
-/// `bucket_url` is the resolved trace bucket (`gs://…`) so the link tracks
-/// runtime overrides; falls back to the compiled-in default. `None` when
-/// neither yields a GCS bucket.
-pub(crate) fn unified_log_url(
-    bucket_url: Option<&str>,
-    session_id: &str,
-    turn_number: i64,
-) -> Option<String> {
-    let bucket = match bucket_url {
-        Some(url) => url.strip_prefix("gs://")?.trim_end_matches('/'),
-        None => SESSION_TRACES_BUCKET?,
-    };
-    Some(format!(
-        "https://console.cloud.google.com/storage/browser/_details/{bucket}/{session_id}/turn_{turn_number}/unified_log.jsonl"
-    ))
-}
-/// Upload bytes to the `auth-diagnostics/{version}/{user_id}/{ts}.jsonl` path
-/// for easy aggregation across users. Used by both the auth refresh failure
-/// uploader and the 401/404 error trace uploader.
-pub(crate) async fn upload_to_auth_diagnostics(
-    log_bytes: &[u8],
-    user_id: &str,
-    upload_method: &crate::session::repo_changes::UploadMethod,
-    auth_manager: Arc<crate::auth::AuthManager>,
-) {
-    let user_id = user_id.replace('/', "_");
-    let ts = chrono::Utc::now().timestamp_millis();
-    let version = xai_grok_version::VERSION;
-    let object_path = format!("auth-diagnostics/{version}/{user_id}/{ts}.jsonl");
-    let config = crate::session::repo_changes::TraceExportConfig {
-        bucket_url: None,
-        service_account_key: None,
-        upload_method: upload_method.clone(),
-        prefix_dir: None,
-        gcs_prefix: None,
-        absolute_paths: false,
-        archive_name_override: None,
-    };
-    match xai_file_utils::gcs::upload_bytes(
-        &config.with_auth(Some(auth_manager)),
-        &object_path,
-        log_bytes,
-        "application/x-ndjson",
-    )
-    .await
-    {
-        Ok(_) => {
-            tracing::info!(
-                version = version,
-                "uploaded diagnostic log to auth-diagnostics"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = % e, "failed to upload diagnostic log to auth-diagnostics"
-            );
-        }
     }
 }

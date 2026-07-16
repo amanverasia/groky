@@ -113,8 +113,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         models_manager: Default::default(),
         file_tool_overrides: None,
         agent_config: None,
-        gcs_bucket_url: None,
-        gcs_upload_method: None,
         hook_registry: None,
         hook_workspace_root: String::new(),
         parent_depth: 0,
@@ -142,7 +140,6 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_skills_config: xai_grok_agent::prompt::skills::SkillsConfig::default(),
         parent_compat: xai_grok_tools::types::compat::CompatConfig::default(),
         auto_wake_delivered: None,
-        synthetic_trace_tx: None,
         task_output_tool_name: xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL
             .to_string(),
         auto_wake_enabled: true,

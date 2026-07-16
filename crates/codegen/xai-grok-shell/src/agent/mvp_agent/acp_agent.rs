@@ -1968,8 +1968,6 @@ impl acp::Agent for MvpAgent {
         fields(
             session_id = %arguments.session_id.0,
             turn_number = tracing::field::Empty,
-            uploads_enabled = tracing::field::Empty,
-            upload_reason = tracing::field::Empty,
         )
     )]
     #[allow(unused_mut)]
@@ -2110,11 +2108,6 @@ impl acp::Agent for MvpAgent {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let turn_number = self.allocate_turn_number(&arguments.session_id);
         tracing::Span::current().record("turn_number", turn_number);
-        tracing::info!("Setting up prompt tracing");
-        let trace_context = self.get_trace_context(&handle.info, turn_number).await;
-        let (harness_block_for_upload, upload_flush_timeout) = crate::util::config::load_blocking_upload_config_sync();
-        let block_for_upload = self.cfg.borrow().mode == config::AgentMode::Headless
-            || harness_block_for_upload;
         let (model_tx, model_rx) = oneshot::channel();
         let _ = handle
             .cmd_tx
@@ -2124,7 +2117,7 @@ impl acp::Agent for MvpAgent {
         let model = model_rx
             .await
             .unwrap_or_else(|_| self.sampling_config.borrow().model.clone());
-        let mut parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>> = None;
+        let parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>> = None;
         let verbatim = arguments
             .meta
             .as_ref()
@@ -2137,122 +2130,6 @@ impl acp::Agent for MvpAgent {
             .and_then(|m| m.get("sendNow"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if let Some(ctx) = trace_context.clone() {
-            let (tx, parsed_prompt_rx) = oneshot::channel::<ParsedPromptInfo>();
-            parsed_prompt_tx = Some(tx);
-            let auth = self.auth_manager.current();
-            let user_id = auth.as_ref().map(|a| a.user_id.clone());
-            let team_id = auth.as_ref().and_then(|a| a.team_id.clone());
-            let user_email = auth.and_then(|a| a.email);
-            let init_meta = self
-                .initialize_request
-                .get()
-                .and_then(|req| req.meta.as_ref());
-            let client_source = init_meta
-                .and_then(|meta| {
-                    meta
-                        .get("clientSource")
-                        .or_else(|| meta.get("clientType"))
-                        .or_else(|| meta.get("clientIdentifier"))
-                })
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let client_version = init_meta
-                .and_then(|meta| meta.get("clientVersion"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| self.cfg.borrow().client_version.clone());
-            let agent_config = self.cfg.borrow().clone();
-            let plugin_registry = self.plugin_registry_snapshot();
-            let prompt_images: Vec<agent_client_protocol::ImageContent> = arguments
-                .prompt
-                .iter()
-                .filter_map(|block| {
-                    if let agent_client_protocol::ContentBlock::Image(img) = block {
-                        Some(img.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let mut prompt_metadata = PromptMetadata {
-                schema_version: GCS_SCHEMA_VERSION.to_string(),
-                session_id: ctx.session_info.id.0.to_string(),
-                turn_number: ctx.turn_number,
-                request_id: prompt_id.clone(),
-                turn_started_at: turn_started_at.clone(),
-                repo_root: None,
-                remote_url: None,
-                user_id,
-                user_email,
-                team_id,
-                client_source,
-                client_version,
-                model: model.to_owned(),
-                reasoning_effort: ctx
-                    .session_handle
-                    .reasoning_effort
-                    .map(|e| e.as_str().to_string()),
-                experiment_id: None,
-                host_os: std::env::consts::OS.to_string(),
-                host_arch: std::env::consts::ARCH.to_string(),
-                prompt_has_image: Some(!prompt_images.is_empty()),
-                prompt_was_truncated: Some(false),
-                prompt_verbatim: if verbatim { Some(true) } else { None },
-                cwd: Some(ctx.session_info.cwd.clone()),
-                agent_type: Some(ctx.session_handle.agent_name.clone()),
-                shell_version: Some(xai_grok_version::VERSION.to_string()),
-                workspace_type: None,
-                sandbox: local_sandbox_telemetry(),
-            };
-            let (session_copy_tx, session_copy_rx) = oneshot::channel();
-            let copy_sent = ctx
-                .session_handle
-                .cmd_tx
-                .send(SessionCommand::CopyFile {
-                    respond_to: session_copy_tx,
-                })
-                .is_ok();
-            if !copy_sent {
-                tracing::warn!(
-                    session_id = % ctx.session_info.id.0, turn_number = ctx.turn_number,
-                    "Failed to send CopyFile command, skipping session state upload"
-                );
-            }
-            tokio::spawn({
-                let ctx = ctx.clone();
-                async move {
-                    if let Ok(Ok(info)) = tokio::time::timeout(
-                            std::time::Duration::from_secs(120),
-                            parsed_prompt_rx,
-                        )
-                        .await && !info.text.is_empty()
-                    {
-                        prompt_metadata.prompt_was_truncated = Some(
-                            info.full_text.is_some(),
-                        );
-                        if let Some(full_text) = &info.full_text {
-                            upload_full_prompt_txt(&ctx, full_text).await;
-                        }
-                    }
-                    upload_metadata(&ctx, prompt_metadata).await;
-                }
-            });
-            spawn_upload_task(
-                "before_uploads",
-                async move {
-                    let before_workspace_fut = async {};
-                    futures::join!(
-                        upload_session_state(& ctx, "before", session_copy_rx,
-                        UploadWait::Confirm), before_workspace_fut, upload_config(& ctx,
-                        & agent_config), crate
-                        ::upload::config_files::upload_config_files(& ctx),
-                        upload_images(& ctx, & prompt_images), upload_plugin_state(& ctx,
-                        plugin_registry.as_deref()),
-                    );
-                },
-            );
-        }
         let next_trace_turn = self
             .session_turn_numbers
             .borrow()
@@ -2295,9 +2172,6 @@ impl acp::Agent for MvpAgent {
                 prompt_id: prompt_id.clone(),
                 prompt_blocks: arguments.prompt.clone(),
                 prompt_mode,
-                artifact_upload_ctx: trace_context
-                    .as_ref()
-                    .map(|ctx| ctx.artifact_upload_context()),
                 client_identifier: prompt_client_identifier,
                 screen_mode: prompt_screen_mode,
                 verbatim,
@@ -2406,8 +2280,9 @@ impl acp::Agent for MvpAgent {
             };
             self.push_roster_activity_delta(&arguments.session_id, end_activity);
         }
-        let resolved_model = handle.get_model_metadata().await.resolved_model_id;
-        let harness_trace_turns = {
+        // Drain the harness trace side buffer so it does not grow unboundedly
+        // across goal turns (the captures were previously uploaded; now dropped).
+        let _harness_trace_turns: Vec<Vec<xai_grok_sampling_types::conversation::ConversationItem>> = {
             let (tx, rx) = oneshot::channel();
             if handle
                 .cmd_tx
@@ -2421,16 +2296,6 @@ impl acp::Agent for MvpAgent {
                 Vec::new()
             }
         };
-        if trace_context.is_some() && !harness_trace_turns.is_empty() {
-            self.upload_harness_trace_turns(
-                    &arguments.session_id,
-                    &handle.info,
-                    &handle.cmd_tx,
-                    &model,
-                    harness_trace_turns,
-                )
-                .await;
-        }
         match stop_result {
             Ok(turn_ok) => {
                 let crate::session::commands::PromptTurnOk {
@@ -2441,13 +2306,8 @@ impl acp::Agent for MvpAgent {
                     structured_output,
                     usage: prompt_usage,
                 } = turn_ok;
-                let subagent_refs = self
-                    .subagent_coordinator
-                    .borrow()
-                    .spawned_refs_for_prompt(&prompt_id);
-                let permission_events = self
-                    .collect_permission_events(&arguments.session_id);
-                let turn_messages: Option<xai_chat_state::TurnCapture> = {
+                // Drain the per-turn message capture (previously uploaded; now dropped).
+                let _turn_messages: Option<xai_chat_state::TurnCapture> = {
                     let (tx, rx) = oneshot::channel();
                     if handle
                         .cmd_tx
@@ -2461,407 +2321,6 @@ impl acp::Agent for MvpAgent {
                         None
                     }
                 };
-                let streaming_partial = crate::upload::turn::take_streaming_partial(
-                        &handle.cmd_tx,
-                        prompt_id.clone(),
-                        matches!(stop_reason, acp::StopReason::EndTurn),
-                        Some(model.clone()),
-                    )
-                    .await
-                    .map(|mut cap| {
-                        cap.reason
-                            .get_or_insert_with(|| match &completion_kind {
-                                crate::session::commands::PromptCompletionKind::Cancelled {
-                                    category,
-                                    ..
-                                } => {
-                                    match category {
-                                        Some(cat) => format!("cancelled:{cat:?}"),
-                                        None => "cancelled".to_string(),
-                                    }
-                                }
-                                _ => "non_completed".to_string(),
-                            });
-                        cap
-                    });
-                let upload_deadline = block_for_upload
-                    .then(|| tokio::time::Instant::now() + upload_flush_timeout);
-                if let Some(ctx) = trace_context.clone() {
-                    let request_id = prompt_id.clone();
-                    let (input_tokens, cached_input_tokens, output_tokens) = turn_snapshot
-                        .as_ref()
-                        .map(|s| (
-                            Some(s.turn_input_tokens),
-                            Some(s.turn_cached_input_tokens),
-                            Some(s.turn_output_tokens),
-                        ))
-                        .unwrap_or((None, None, None));
-                    if let Some(deadline) = upload_deadline {
-                        let completed = matches!(stop_reason, acp::StopReason::EndTurn);
-                        let start_for_upload = turn_snapshot
-                            .as_ref()
-                            .and_then(|s| s.start_prompt_mode.clone())
-                            .or_else(|| Some(prompt_mode.to_string()));
-                        let end_for_upload = turn_snapshot
-                            .as_ref()
-                            .and_then(|s| s.end_prompt_mode.clone());
-                        let result = TurnResultMetadata {
-                            schema_version: GCS_SCHEMA_VERSION,
-                            request_id,
-                            completed,
-                            stop_reason: Some(format!("{stop_reason:?}")),
-                            total_tokens: Some(total_tokens),
-                            input_tokens,
-                            cached_input_tokens,
-                            output_tokens,
-                            error: None,
-                            finished_at: chrono::Utc::now().to_rfc3339(),
-                            signals: turn_snapshot.as_ref().map(|s| s.current.clone()),
-                            turn_delta: turn_snapshot.as_ref().map(|s| s.delta.clone()),
-                            start_prompt_mode: start_for_upload,
-                            end_prompt_mode: end_for_upload,
-                            resolved_model: resolved_model.clone(),
-                            subagents_spawned: subagent_refs.clone(),
-                        };
-                        upload_turn_result(&ctx, &result, UploadWait::Defer { deadline })
-                            .await;
-                    } else {
-                        let snapshot_clone = turn_snapshot.clone();
-                        let resolved_model = resolved_model.clone();
-                        tokio::spawn(async move {
-                            let completed = matches!(
-                                stop_reason, acp::StopReason::EndTurn
-                            );
-                            let start_for_upload = snapshot_clone
-                                .as_ref()
-                                .and_then(|s| s.start_prompt_mode.clone())
-                                .or_else(|| Some(prompt_mode.to_string()));
-                            let end_for_upload = snapshot_clone
-                                .as_ref()
-                                .and_then(|s| s.end_prompt_mode.clone());
-                            let result = TurnResultMetadata {
-                                schema_version: GCS_SCHEMA_VERSION,
-                                request_id,
-                                completed,
-                                stop_reason: Some(format!("{stop_reason:?}")),
-                                total_tokens: Some(total_tokens),
-                                input_tokens,
-                                cached_input_tokens,
-                                output_tokens,
-                                error: None,
-                                finished_at: chrono::Utc::now().to_rfc3339(),
-                                signals: snapshot_clone.as_ref().map(|s| s.current.clone()),
-                                turn_delta: snapshot_clone
-                                    .as_ref()
-                                    .map(|s| s.delta.clone()),
-                                start_prompt_mode: start_for_upload,
-                                end_prompt_mode: end_for_upload,
-                                resolved_model,
-                                subagents_spawned: subagent_refs.clone(),
-                            };
-                            upload_turn_result(&ctx, &result, UploadWait::Confirm).await;
-                        });
-                    }
-                }
-                if let Some(ctx) = trace_context {
-                    let (session_copy_tx, session_copy_rx) = oneshot::channel();
-                    let copy_sent = ctx
-                        .session_handle
-                        .cmd_tx
-                        .send(SessionCommand::CopyFile {
-                            respond_to: session_copy_tx,
-                        })
-                        .is_ok();
-                    if !copy_sent {
-                        tracing::warn!(
-                            session_id = % ctx.session_info.id.0, turn_number = ctx
-                            .turn_number,
-                            "Failed to send CopyFile command, skipping session state upload"
-                        );
-                    }
-                    if turn_number == 0
-                        && let Some(client) = self.session_registry_client()
-                    {
-                        let cwd_str = handle.info.cwd.clone();
-                        let model = self.models_manager.current_model_id().0.to_string();
-                        let hostname = gethostname::gethostname()
-                            .to_string_lossy()
-                            .to_string();
-                        let suppress = self
-                            .auth_manager
-                            .current_or_expired()
-                            .is_some_and(|a| a.is_zdr_team());
-                        let device_id = if suppress { None } else { Some(agent_id()) };
-                        let first_prompt = if suppress {
-                            None
-                        } else {
-                            arguments
-                                    .prompt
-                                    .iter()
-                                    .find_map(|b| {
-                                        if let acp::ContentBlock::Text(t) = b {
-                                            Some(t.text.clone())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                        };
-                        let sid = arguments.session_id.to_string();
-                        tokio::spawn(async move {
-                            let git_out = |args: &[&str]| -> Option<String> {
-                                xai_tty_utils::git_command()
-                                    .current_dir(&cwd_str)
-                                    .args(args)
-                                    .output()
-                                    .ok()
-                                    .filter(|o| o.status.success())
-                                    .map(|o| {
-                                        String::from_utf8_lossy(&o.stdout).trim().to_string()
-                                    })
-                                    .filter(|s| !s.is_empty())
-                            };
-                            let repo_remote_url = git_out(
-                                &["remote", "get-url", "origin"],
-                            );
-                            let repo_branch = git_out(
-                                &["rev-parse", "--abbrev-ref", "HEAD"],
-                            );
-                            let repo_head_at_start = git_out(&["rev-parse", "HEAD"]);
-                            let reg_req = crate::agent::session_registry_client::RegisterRequest {
-                                session_id: sid.clone(),
-                                cwd: cwd_str,
-                                gcs_trace_prefix: sid,
-                                model_id: Some(model),
-                                repo_remote_url,
-                                repo_branch,
-                                repo_head_at_start,
-                                hostname: Some(hostname),
-                                device_id,
-                                parent_session_id: None,
-                                session_kind: None,
-                                subagent_type: None,
-                                subagent_persona: None,
-                                subagent_role: None,
-                                fork_context_source: None,
-                                subagent_depth: None,
-                            };
-                            if let Err(e) = client.register(&reg_req).await {
-                                tracing::warn!(
-                                    error = % e, "session registry register failed (non-fatal)"
-                                );
-                            }
-                            let info = crate::session::info::Info {
-                                id: agent_client_protocol::SessionId::new(
-                                    reg_req.session_id.clone(),
-                                ),
-                                cwd: reg_req.cwd.clone(),
-                            };
-                            let summary_path = crate::session::persistence::session_dir(
-                                    &info,
-                                )
-                                .join("summary.json");
-                            let summary = if suppress {
-                                None
-                            } else {
-                                std::fs::read(&summary_path)
-                                        .ok()
-                                        .and_then(|bytes| {
-                                            serde_json::from_slice::<
-                                                crate::session::persistence::Summary,
-                                            >(&bytes)
-                                                .ok()
-                                        })
-                                        .map(|s| s.session_summary)
-                                        .filter(|s| !s.is_empty())
-                            };
-                            if first_prompt.is_some() || summary.is_some() {
-                                let upd_req = crate::agent::session_registry_client::UpdateRequest {
-                                    summary,
-                                    first_prompt,
-                                    last_turn_number: None,
-                                    repo_head_at_end: None,
-                                    restorable_turn_number: None,
-                                };
-                                tracing::debug!(
-                                    session_id = % reg_req.session_id, has_summary = upd_req
-                                    .summary.is_some(), "session registry post-register update"
-                                );
-                                if let Err(e) = client
-                                    .update(&reg_req.session_id, &upd_req)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        error = % e,
-                                        "session registry first-prompt update failed (non-fatal)"
-                                    );
-                                }
-                            }
-                        });
-                    }
-                    let registry_turn = i32::try_from(turn_number).unwrap_or(i32::MAX);
-                    let cwd_for_git = handle.info.cwd.clone();
-                    /// Advances `last_turn_number` immediately after a turn completes.
-                    ///
-                    /// Fired right after the session turn finishes, before any artifact uploads.
-                    /// Sets `last_turn_number` with `repo_head_at_end` and does not wait for
-                    /// session-state uploads.
-                    async fn advance_last_turn(
-                        client: crate::agent::session_registry_client::SessionRegistryClient,
-                        session_id: String,
-                        turn: i32,
-                        cwd: String,
-                    ) {
-                        let repo_head_at_end = xai_tty_utils::git_command()
-                            .current_dir(&cwd)
-                            .args(["rev-parse", "HEAD"])
-                            .output()
-                            .ok()
-                            .filter(|o| o.status.success())
-                            .map(|o| {
-                                String::from_utf8_lossy(&o.stdout).trim().to_string()
-                            })
-                            .filter(|s| !s.is_empty());
-                        let req = crate::agent::session_registry_client::UpdateRequest {
-                            summary: None,
-                            first_prompt: None,
-                            last_turn_number: Some(turn),
-                            repo_head_at_end,
-                            restorable_turn_number: None,
-                        };
-                        if let Err(e) = client.update(&session_id, &req).await {
-                            tracing::warn!(
-                                error = % e,
-                                "session registry last_turn_number update failed (non-fatal)"
-                            );
-                        }
-                    }
-                    /// Advances `restorable_turn_number` after required restore artifacts are
-                    /// confirmed durable.
-                    ///
-                    /// Called after the post-turn session archive is confirmed in cloud storage.
-                    async fn advance_restorable_turn(
-                        client: crate::agent::session_registry_client::SessionRegistryClient,
-                        session_id: String,
-                        turn: i32,
-                    ) {
-                        let req = crate::agent::session_registry_client::UpdateRequest {
-                            summary: None,
-                            first_prompt: None,
-                            last_turn_number: None,
-                            repo_head_at_end: None,
-                            restorable_turn_number: Some(turn),
-                        };
-                        if let Err(e) = client.update(&session_id, &req).await {
-                            tracing::warn!(
-                                error = % e,
-                                "session registry restorable_turn_number update failed (non-fatal)"
-                            );
-                        }
-                    }
-                    if let Some(client) = self.session_registry_client() {
-                        let sid = arguments.session_id.to_string();
-                        let cwd = cwd_for_git.clone();
-                        tokio::spawn(async move {
-                            advance_last_turn(client, sid, registry_turn, cwd).await;
-                        });
-                    }
-                    {
-                        let cwd = cwd_for_git.clone();
-                        let cmd_tx = handle.cmd_tx.clone();
-                        tokio::spawn(async move {
-                            let head = xai_grok_workspace::session::git::get_current_commit(
-                                    std::path::Path::new(&cwd),
-                                )
-                                .await;
-                            let branch = xai_grok_workspace::session::git::get_branch(
-                                    std::path::Path::new(&cwd),
-                                )
-                                .await;
-                            let _ = cmd_tx
-                                .send(crate::session::SessionCommand::PersistGitHead {
-                                    commit: head,
-                                    branch,
-                                });
-                        });
-                    }
-                    let registry_client_for_restorable = self.session_registry_client();
-                    let registry_sid_for_restorable = arguments.session_id.to_string();
-                    let err_ctx = ctx.clone();
-                    if let Some(deadline) = upload_deadline {
-                        match complete_prompt_trace(
-                                ctx,
-                                permission_events,
-                                session_copy_rx,
-                                turn_messages,
-                                streaming_partial,
-                                UploadWait::Defer { deadline },
-                            )
-                            .await
-                        {
-                            Ok(true) => {
-                                if let Some(client) = registry_client_for_restorable {
-                                    advance_restorable_turn(
-                                            client,
-                                            registry_sid_for_restorable,
-                                            registry_turn,
-                                        )
-                                        .await;
-                                }
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    "session state unconfirmed within the flush budget; \
-                                     skipping restorable_turn_number advance"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to complete prompt trace: {e:?}");
-                                crate::upload::trace::flush_then_write_error_manifest(
-                                        &err_ctx,
-                                        deadline,
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else {
-                        spawn_upload_task(
-                            "after_uploads",
-                            async move {
-                                match complete_prompt_trace(
-                                        ctx,
-                                        permission_events,
-                                        session_copy_rx,
-                                        turn_messages,
-                                        streaming_partial,
-                                        UploadWait::Confirm,
-                                    )
-                                    .await
-                                {
-                                    Ok(true) => {
-                                        if let Some(client) = registry_client_for_restorable {
-                                            advance_restorable_turn(
-                                                    client,
-                                                    registry_sid_for_restorable,
-                                                    registry_turn,
-                                                )
-                                                .await;
-                                        }
-                                    }
-                                    Ok(false) => {
-                                        tracing::warn!(
-                                            "Session state upload failed; skipping registry \
-                                         restorable_turn_number advance"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to complete prompt trace: {e:?}");
-                                        write_error_manifest(&err_ctx).await;
-                                    }
-                                }
-                            },
-                        );
-                    }
-                }
                 let last_turn_usage = last_turn_usage_for_meta;
                 let cancellation_category = match &completion_kind {
                     crate::session::commands::PromptCompletionKind::Cancelled {
@@ -2893,11 +2352,8 @@ impl acp::Agent for MvpAgent {
                 )
             }
             Err(err) => {
-                let subagent_refs = self
-                    .subagent_coordinator
-                    .borrow()
-                    .spawned_refs_for_prompt(&prompt_id);
-                let turn_messages: Option<xai_chat_state::TurnCapture> = {
+                // Drain the per-turn message capture (previously uploaded; now dropped).
+                let _turn_messages: Option<xai_chat_state::TurnCapture> = {
                     let (tx, rx) = oneshot::channel();
                     if handle
                         .cmd_tx
@@ -2911,116 +2367,6 @@ impl acp::Agent for MvpAgent {
                         None
                     }
                 };
-                let err_kind_str = format!("{:?}", err.code);
-                let streaming_partial = crate::upload::turn::take_streaming_partial(
-                        &handle.cmd_tx,
-                        prompt_id.clone(),
-                        false,
-                        Some(model.clone()),
-                    )
-                    .await
-                    .map(|mut cap| {
-                        cap.reason = Some(format!("sampler_error:{err_kind_str}"));
-                        cap
-                    });
-                if let Some(ctx) = trace_context.clone() {
-                    let request_id = prompt_id.clone();
-                    let err_str = format!("{err:?}");
-                    let stop_reason = crate::sampling::error::stop_reason_for_turn_error(
-                            &err,
-                        )
-                        .to_string();
-                    let upload_unified = matches!(
-                        crate ::sampling::error::http_status_from_error(& err), Some(401
-                        | 404),
-                    );
-                    let upload_deadline = block_for_upload
-                        .then(|| tokio::time::Instant::now() + upload_flush_timeout);
-                    if let Some(deadline) = upload_deadline {
-                        let result = TurnResultMetadata {
-                            schema_version: GCS_SCHEMA_VERSION,
-                            request_id,
-                            completed: false,
-                            stop_reason: Some(stop_reason),
-                            total_tokens: None,
-                            input_tokens: None,
-                            cached_input_tokens: None,
-                            output_tokens: None,
-                            error: Some(err_str),
-                            finished_at: chrono::Utc::now().to_rfc3339(),
-                            signals: None,
-                            turn_delta: None,
-                            start_prompt_mode: Some(prompt_mode.to_string()),
-                            end_prompt_mode: None,
-                            resolved_model: resolved_model.clone(),
-                            subagents_spawned: subagent_refs.clone(),
-                        };
-                        let wait = UploadWait::Defer { deadline };
-                        upload_turn_result(&ctx, &result, wait).await;
-                        if let Some(capture) = turn_messages {
-                            upload_turn_messages(&ctx, capture, wait).await;
-                        }
-                        if let Some(ref capture) = streaming_partial {
-                            crate::upload::trace::upload_streaming_partial(
-                                    &ctx,
-                                    capture,
-                                    wait,
-                                )
-                                .await;
-                        }
-                        if upload_unified {
-                            upload_unified_log(&ctx, wait).await;
-                        }
-                        crate::upload::trace::flush_then_write_error_manifest(
-                                &ctx,
-                                deadline,
-                            )
-                            .await;
-                    } else {
-                        let resolved_model = resolved_model.clone();
-                        spawn_upload_task(
-                            "error_turn_result",
-                            async move {
-                                let result = TurnResultMetadata {
-                                    schema_version: GCS_SCHEMA_VERSION,
-                                    request_id,
-                                    completed: false,
-                                    stop_reason: Some(stop_reason),
-                                    total_tokens: None,
-                                    input_tokens: None,
-                                    cached_input_tokens: None,
-                                    output_tokens: None,
-                                    error: Some(err_str),
-                                    finished_at: chrono::Utc::now().to_rfc3339(),
-                                    signals: None,
-                                    turn_delta: None,
-                                    start_prompt_mode: Some(prompt_mode.to_string()),
-                                    end_prompt_mode: None,
-                                    resolved_model,
-                                    subagents_spawned: subagent_refs.clone(),
-                                };
-                                upload_turn_result(&ctx, &result, UploadWait::Confirm)
-                                    .await;
-                                if let Some(capture) = turn_messages {
-                                    upload_turn_messages(&ctx, capture, UploadWait::Confirm)
-                                        .await;
-                                }
-                                if let Some(ref capture) = streaming_partial {
-                                    crate::upload::trace::upload_streaming_partial(
-                                            &ctx,
-                                            capture,
-                                            UploadWait::Confirm,
-                                        )
-                                        .await;
-                                }
-                                if upload_unified {
-                                    upload_unified_log(&ctx, UploadWait::Confirm).await;
-                                }
-                                write_error_manifest(&ctx).await;
-                            },
-                        );
-                    }
-                }
                 let err = if crate::sampling::error::prompt_usage_from_error(&err)
                     .is_some()
                 {

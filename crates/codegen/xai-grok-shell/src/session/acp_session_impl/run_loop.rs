@@ -267,7 +267,7 @@ pub(super) async fn run_session(
             signals.turn_count as u64, tool_call_count : signals.tool_call_count as u64,
             compaction_count : signals.compaction_count as u64, model_id, },); } } if let
             Some(cancel) = & session.sync_loop_cancel { cancel.cancel(); } session
-            .feedback_manager.shutdown(session.upload_queue.get()). await; if ! session
+            .feedback_manager.shutdown(). await; if ! session
             .startup_hints.is_subagent { session.persist_background_task_manifest().
             await; } cleanup_session_scratch(& session); return; }; match cmd {
             SessionCommand::Initialize { system_prompt } => { session
@@ -279,7 +279,7 @@ pub(super) async fn run_session(
             let completion_tx = completion_tx.clone(); tokio::task::spawn_local(async
             move { s.resume_plan_approval(completion_tx). await; }); }
             SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode,
-            artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent,
+            client_identifier, screen_mode, verbatim, traceparent,
             json_schema, send_now, respond_to, persist_ack, parsed_prompt_tx } => {
             session.ensure_prefix_ready(). await; let origin =
             super::PromptOrigin::from_prompt_id(& prompt_id); if ! origin.is_synthetic()
@@ -292,11 +292,8 @@ pub(super) async fn run_session(
             queue_depth = queue_depth,
             "auto-wake: session actor received synthetic prompt"); } if let Some(ref tp)
             = traceparent { let meta = serde_json::json!({ "traceparent" : tp });
-            xai_file_utils::trace_context::link_current_span_to_meta(& meta); } let
-            (trace_gcs_config, artifact_tracker) = match artifact_upload_ctx { Some(tu)
-            => (Some(tu.gcs_config), Some(tu.artifact_tracker)), None => (None, None), };
-            let cancel_for_send_now = session.queue_input(prompt_blocks, prompt_id,
-            prompt_mode, trace_gcs_config, artifact_tracker, client_identifier,
+            xai_file_utils::trace_context::link_current_span_to_meta(& meta); } let cancel_for_send_now = session.queue_input(prompt_blocks, prompt_id,
+            prompt_mode, client_identifier,
             screen_mode, verbatim, json_schema, send_now, respond_to, persist_ack,
             parsed_prompt_tx). await; if cancel_for_send_now { session
             .cancel_turn_for_send_now(& mut replay_buffer). await; }
@@ -748,7 +745,7 @@ pub(super) async fn run_session(
             (respond_to, _) = tokio::sync::oneshot::channel(); { let mut state = session
             .state.lock(). await; state.pending_inputs.push_back(InputItem { prompt_id,
             prompt_blocks, prompt_mode : crate ::session::plan_mode::PromptMode::Agent,
-            trace_gcs_config : None, artifact_tracker : None, client_identifier : None,
+            client_identifier : None,
             screen_mode : None, verbatim : true, json_schema : None, origin :
             super::PromptOrigin::GoalSummary, respond_to, persist_ack : None,
             parsed_prompt_tx : None, queue_meta : None, send_now : false, }); }
@@ -812,7 +809,7 @@ pub(super) async fn run_session(
             .telemetry_snapshot(); session.emit_memory_session_summary(& telem,
             total_chunks_at_end, session_end_result); if let Some(cancel) = & session
             .sync_loop_cancel { cancel.cancel(); } session.feedback_manager
-            .shutdown(session.upload_queue.get()). await; if ! session.startup_hints
+            .shutdown(). await; if ! session.startup_hints
             .is_subagent { session.persist_background_task_manifest(). await; }
             cleanup_session_scratch(& session); return; } } }
         }

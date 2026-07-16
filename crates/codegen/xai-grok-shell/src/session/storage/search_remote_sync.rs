@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use super::search_fts::SessionSearchIndex;
 
-/// GCS bucket for session search index sync (same as session traces);
+/// GCS bucket for session search index sync;
 /// `None` makes remote sync a no-op.
-const SEARCH_INDEX_BUCKET: Option<&str> = crate::upload::gcs::SESSION_TRACES_BUCKET;
+const SEARCH_INDEX_BUCKET: Option<&str> = option_env!("GROK_SESSION_TRACES_BUCKET_DEFAULT");
 
 /// GCS object name for the compressed index.
 const REMOTE_INDEX_OBJECT: &str = "session_search.sqlite.zst";

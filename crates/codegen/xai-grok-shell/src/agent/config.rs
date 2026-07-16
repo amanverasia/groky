@@ -162,24 +162,6 @@ pub struct EndpointsConfig {
     /// Env: `GROK_FEEDBACK_BASE_URL`. Where feedback submissions go.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback_base_url: Option<String>,
-    /// Env: `GROK_TRACE_UPLOAD_URL`. Where trace uploads go.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_url: Option<String>,
-    /// Env: `GROK_TRACE_UPLOAD_BUCKET`. Direct bucket (`gs://` or `s3://`), bypasses proxy.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_bucket: Option<String>,
-    /// Env: `GROK_TRACE_UPLOAD_REGION`. AWS region (S3 only).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_region: Option<String>,
-    /// Env: `GROK_TRACE_UPLOAD_CREDENTIALS_FILE`. Path to GCS SA key or AWS credentials file.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_credentials_file: Option<String>,
-    /// Inline credentials (JSON/INI). Takes precedence over `credentials_file`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_credentials: Option<String>,
-    /// Env: `GROK_TRACE_UPLOAD_ENDPOINT_URL`. Custom S3-compatible endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trace_upload_endpoint_url: Option<String>,
     /// Env: `GROK_DEPLOYMENT_KEY`. Management API key for enterprise deployments.
     /// Sent on telemetry and service requests for deployment-level attribution.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,11 +236,6 @@ impl EndpointsConfig {
     pub fn resolve_feedback_base_url(&self) -> String {
         blank_as_unset(&self.feedback_base_url).unwrap_or_else(|| self.proxy_url())
     }
-    /// Trace upload endpoint — an auxiliary service, so it defaults to the
-    /// cli-chat-proxy, never `xai_api_base_url`.
-    pub fn resolve_trace_upload_url(&self) -> String {
-        blank_as_unset(&self.trace_upload_url).unwrap_or_else(|| self.proxy_url())
-    }
     /// Managed deployment-config URL (`grok setup`): explicit `managed_config_url`,
     /// else `proxy_url` + `/deployment/config`. Never `xai_api_base_url`, so the
     /// deployment key reaches the proxy, not the inference host.
@@ -268,105 +245,6 @@ impl EndpointsConfig {
                 "{}/deployment/config",
                 self.proxy_url().trim_end_matches('/')
             )
-        })
-    }
-    /// Resolve trace upload credentials: inline > file > `None` (ambient).
-    pub fn resolve_trace_credentials(&self) -> Option<String> {
-        if let Some(ref inline) = self.trace_upload_credentials {
-            let trimmed = inline.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_owned());
-            }
-        }
-        self.trace_upload_credentials_file
-            .as_deref()
-            .and_then(|path| {
-                std::fs::read_to_string(path)
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            path = % path, error = % e,
-                            "Failed to read trace upload credentials file"
-                        );
-                    })
-                    .ok()
-            })
-    }
-    /// Resolve direct-to-bucket upload method from `trace_upload_bucket`.
-    /// Returns `None` if no bucket is configured or scheme is unrecognized.
-    pub fn resolve_direct_upload_method(
-        &self,
-    ) -> Option<crate::session::repo_changes::UploadMethod> {
-        let bucket_url = self.trace_upload_bucket.as_deref()?.trim();
-        if bucket_url.is_empty() {
-            return None;
-        }
-        if let Some(bucket_name) = bucket_url
-            .strip_prefix("s3://")
-            .map(|s| s.trim_end_matches('/'))
-        {
-            let region = self
-                .trace_upload_region
-                .clone()
-                .unwrap_or_else(|| "us-east-1".to_owned());
-            return Some(crate::session::repo_changes::UploadMethod::S3 {
-                bucket: bucket_name.to_owned(),
-                region,
-                credentials_file: None,
-                credentials_content: self.resolve_trace_credentials(),
-                endpoint_url: self.trace_upload_endpoint_url.clone(),
-            });
-        }
-        if bucket_url.starts_with("gs://") {
-            return Some(crate::session::repo_changes::UploadMethod::Direct {
-                service_account_key: self.resolve_trace_credentials(),
-            });
-        }
-        tracing::warn!(
-            bucket = % bucket_url,
-            "trace_upload_bucket has unrecognized scheme (expected gs:// or s3://), ignoring"
-        );
-        None
-    }
-    /// Whether trace upload can authenticate without an interactive login.
-    pub fn has_noninteractive_upload_auth(&self) -> bool {
-        self.deployment_key.is_some() || self.resolve_direct_upload_method().is_some()
-    }
-    /// Direct bucket → proxy (if `auth_token` or `deployment_key`) → ambient GCS → `None`.
-    pub fn resolve_upload_method(
-        &self,
-        auth_token: Option<String>,
-    ) -> Option<crate::session::repo_changes::UploadMethod> {
-        if let Some(method) = self.resolve_direct_upload_method() {
-            return Some(method);
-        }
-        if auth_token.is_some() || self.deployment_key.is_some() {
-            return Some(crate::session::repo_changes::UploadMethod::Proxy {
-                proxy_base_url: self.resolve_trace_upload_url(),
-                user_token: auth_token.unwrap_or_default(),
-                deployment_key: self.deployment_key.clone(),
-                alpha_test_key: self.alpha_test_key.clone(),
-            });
-        }
-        let service_account_key = crate::util::config::load_gcs_service_account_key_sync();
-        if service_account_key.is_some() {
-            return Some(crate::session::repo_changes::UploadMethod::Direct {
-                service_account_key,
-            });
-        }
-        None
-    }
-    /// Resolve trace bucket URL: env > config > compiled-in default.
-    /// `None` disables direct GCS trace uploads.
-    pub fn resolve_trace_bucket_url(&self) -> Option<Resolved<String>> {
-        resolve_string_flag(
-            None,
-            "GROK_TELEMETRY_GCS_BUCKET",
-            self.trace_upload_bucket.as_deref(),
-            None,
-        )
-        .or_else(|| {
-            crate::upload::gcs::SESSION_TRACES_BUCKET
-                .map(|b| Resolved::new(format!("gs://{b}"), ConfigSource::Default))
         })
     }
     /// `models_list_url` > `{models_base_url}/models` > `{proxy_base_url}/models`.
@@ -391,12 +269,6 @@ impl Default for EndpointsConfig {
             models_base_url: env_string("GROK_MODELS_BASE_URL"),
             models_list_url: env_string("GROK_MODELS_LIST_URL"),
             feedback_base_url: env_string("GROK_FEEDBACK_BASE_URL"),
-            trace_upload_url: env_string("GROK_TRACE_UPLOAD_URL"),
-            trace_upload_bucket: env_string("GROK_TRACE_UPLOAD_BUCKET"),
-            trace_upload_region: env_string("GROK_TRACE_UPLOAD_REGION"),
-            trace_upload_credentials_file: env_string("GROK_TRACE_UPLOAD_CREDENTIALS_FILE"),
-            trace_upload_credentials: None,
-            trace_upload_endpoint_url: env_string("GROK_TRACE_UPLOAD_ENDPOINT_URL"),
             deployment_key: env_string("GROK_DEPLOYMENT_KEY"),
             managed_config_url: env_string("GROK_MANAGED_CONFIG_URL"),
             asset_server_url: default_asset_server_url(),
@@ -1870,9 +1742,6 @@ impl Config {
     pub fn is_telemetry_enabled(&self) -> bool {
         self.resolve_telemetry_mode().value.is_enabled()
     }
-    pub fn is_trace_upload_enabled(&self) -> bool {
-        self.resolve_trace_upload().value
-    }
     pub fn is_feedback_enabled(&self) -> bool {
         self.resolve_feedback().value
     }
@@ -1900,9 +1769,6 @@ impl Config {
         }
         Resolved::new(TelemetryMode::Disabled, ConfigSource::Default)
     }
-    pub(crate) fn resolve_trace_upload(&self) -> Resolved<bool> {
-        Resolved::new(false, ConfigSource::Default)
-    }
     /// Resolve jemalloc heap-profile config from stored remote settings + gates.
     pub fn resolve_jemalloc_heap_profile(
         &self,
@@ -1914,7 +1780,6 @@ impl Config {
             rs.and_then(|s| s.jemalloc_heap_profile_thresholds_bytes.as_deref()),
             rs.and_then(|s| s.jemalloc_heap_profile_poll_interval_secs),
             data_collection_disabled,
-            self.resolve_trace_upload().value,
             crate::heap_profile::prof_available(),
         )
     }
@@ -1931,25 +1796,7 @@ impl Config {
             jemalloc_thresholds,
             jemalloc_poll_interval_secs,
             data_collection_disabled,
-            self.resolve_trace_upload().value,
             crate::heap_profile::prof_available(),
-        )
-    }
-    pub(crate) fn trace_upload_decision_debug(&self) -> serde_json::Value {
-        let telemetry = self.resolve_telemetry_mode();
-        let trace_upload = self.resolve_trace_upload();
-        let req = &self.requirements.trace_upload;
-        serde_json::json!(
-            { "trace_upload" : trace_upload.value, "trace_upload_source" : trace_upload
-            .source.to_string(), "telemetry_mode" : telemetry.value.to_string(),
-            "telemetry_source" : telemetry.source.to_string(), "in_requirement_pin" : req
-            .pinned(), "in_requirement_src" : req.source().map(| s | s.to_string()),
-            "in_env_trace_upload" : std::env::var("GROK_TELEMETRY_TRACE_UPLOAD").ok(),
-            "in_env_telemetry_enabled" : std::env::var("GROK_TELEMETRY_ENABLED").ok(),
-            "in_cfg_telemetry_trace_upload" : serde_json::Value::Null,
-            "in_cfg_features_telemetry" : self.features.telemetry.map(| m | m
-            .to_string()), "has_remote_settings" :
-            self.remote_settings.is_some(), }
         )
     }
     pub(crate) fn resolve_feedback(&self) -> Resolved<bool> {
@@ -4577,6 +4424,27 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use xai_grok_test_support::EnvGuard;
+    /// The trace-upload pipeline is removed: no `trace_upload*` field may
+    /// survive on `EndpointsConfig` (serialization is the full field surface
+    /// because none of the fields are `#[serde(skip)]`). The env vars would
+    /// populate the removed Option fields if they were ever reintroduced.
+    #[test]
+    #[serial]
+    fn endpoints_config_has_no_trace_upload_serialization() {
+        let _url = EnvGuard::set("GROK_TRACE_UPLOAD_URL", "https://example.invalid");
+        let _bucket = EnvGuard::set("GROK_TRACE_UPLOAD_BUCKET", "gs://example");
+        let _region = EnvGuard::set("GROK_TRACE_UPLOAD_REGION", "us-east-1");
+        let _creds = EnvGuard::set("GROK_TRACE_UPLOAD_CREDENTIALS_FILE", "/dev/null");
+        let _endpoint = EnvGuard::set("GROK_TRACE_UPLOAD_ENDPOINT_URL", "https://example.invalid");
+        let value = toml::Value::try_from(EndpointsConfig::default()).unwrap();
+        let table = value.as_table().unwrap();
+        for key in table.keys() {
+            assert!(
+                !key.contains("trace_upload"),
+                "trace upload field survived: {key}"
+            );
+        }
+    }
     #[test]
     fn main_cli_tools_override_preserves_profile_injection_policy() {
         let overrides = CliAgentOverrides {
@@ -6721,7 +6589,6 @@ reasoning_effort = "low"
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("legacy keys must still parse");
         assert!(!cfg.is_telemetry_enabled());
-        assert!(!cfg.is_trace_upload_enabled());
     }
     /// Empty/whitespace legacy values also parse fine and remain inert.
     #[test]
@@ -6745,7 +6612,6 @@ reasoning_effort = "low"
         let cfg = Config::new_from_toml_cfg(&raw).expect("should parse");
         let _defaults = TelemetryConfig::default();
         assert!(!cfg.is_telemetry_enabled());
-        assert!(!cfg.is_trace_upload_enabled());
     }
     #[test]
     fn auth_alias_maps_to_grok_com_config() {
@@ -7343,7 +7209,6 @@ reasoning_effort = "low"
             format!("{proxy}/deployment/config")
         );
         assert_eq!(cfg.resolve_feedback_base_url(), proxy);
-        assert_eq!(cfg.resolve_trace_upload_url(), proxy);
         assert_eq!(cfg.xai_api_base_url, inference);
         let overridden = EndpointsConfig {
             cli_chat_proxy_base_url: Some("https://proxy.enterprise.example/v1".to_string()),
@@ -7351,7 +7216,6 @@ reasoning_effort = "low"
                 "https://control.enterprise.example/deployment/config".to_string(),
             ),
             feedback_base_url: Some("https://feedback.enterprise.example".to_string()),
-            trace_upload_url: Some("https://trace.enterprise.example".to_string()),
             ..Default::default()
         };
         assert_eq!(
@@ -7365,10 +7229,6 @@ reasoning_effort = "low"
         assert_eq!(
             overridden.resolve_feedback_base_url(),
             "https://feedback.enterprise.example"
-        );
-        assert_eq!(
-            overridden.resolve_trace_upload_url(),
-            "https://trace.enterprise.example"
         );
     }
     /// REGRESSION: the managed-config URL never follows `xai_api_base_url`
@@ -7727,37 +7587,6 @@ reasoning_effort = "low"
         let r = cfg.resolve_feedback();
         assert_eq!(r.source, ConfigSource::Remote);
         assert!(r.value);
-    }
-    #[test]
-    #[serial]
-    fn resolve_trace_upload_disabled_despite_config_env_and_requirement() {
-        unsafe { std::env::set_var("GROK_TELEMETRY_ENABLED", "1") };
-        unsafe { std::env::set_var("GROK_TELEMETRY_TRACE_UPLOAD", "1") };
-        let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Disabled);
-        cfg.requirements
-            .trace_upload
-            .pin(true, crate::config::RequirementSource::Unknown);
-        let r = cfg.resolve_trace_upload();
-        assert!(!r.value, "trace upload is removed; always disabled");
-        assert_eq!(r.source, ConfigSource::Default);
-        assert!(!cfg.is_trace_upload_enabled());
-        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
-    }
-    #[test]
-    #[serial]
-    fn trace_upload_decision_debug_reports_winning_source() {
-        unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
-        unsafe { std::env::remove_var("GROK_TELEMETRY_TRACE_UPLOAD") };
-        let mut cfg = Config::default();
-        cfg.features.telemetry = Some(TelemetryMode::Disabled);
-        cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
-        let d = cfg.trace_upload_decision_debug();
-        assert_eq!(d["trace_upload"], serde_json::json!(false));
-        assert_eq!(d["trace_upload_source"], serde_json::json!("default"));
-        assert_eq!(d["telemetry_mode"], serde_json::json!("false"));
-        assert_eq!(d["has_remote_settings"], serde_json::json!(true));
     }
     #[test]
     #[serial]

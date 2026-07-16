@@ -196,7 +196,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -282,7 +281,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             });
             let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "hello persist".to_string(),
@@ -652,7 +650,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -738,7 +735,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             });
             let _ = actor
                 .process_conversation_turn_with_recovery("disabled-memory", None, None, None)
@@ -924,7 +920,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(agent),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -1027,7 +1022,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             };
             let (tx, rx) = tokio::sync::oneshot::channel();
             let bridge = actor.agent.borrow().tool_bridge().clone();
@@ -1046,8 +1040,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         prompt_id: "queued".into(),
                         prompt_blocks: vec![],
                         prompt_mode: PromptMode::Agent,
-                        trace_gcs_config: None,
-                        artifact_tracker: None,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: false,
@@ -1482,8 +1474,6 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
             prompt_id: prompt_id.to_string(),
             prompt_blocks: vec![],
             prompt_mode: PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,
@@ -1676,8 +1666,6 @@ async fn cancel_resolves_front_when_running_task_is_none() {
             prompt_id: prompt_id.to_string(),
             prompt_blocks: vec![],
             prompt_mode: PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,
@@ -1968,7 +1956,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(agent),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -2071,7 +2058,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             };
             let request_id = xai_grok_sampler::RequestId::random();
             let request_id_for_task = request_id.clone();
@@ -2203,8 +2189,6 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
             prompt_id: prompt_id.to_string(),
             prompt_blocks: vec![],
             prompt_mode: PromptMode::Agent,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,

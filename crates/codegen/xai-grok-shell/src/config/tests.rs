@@ -2587,10 +2587,10 @@ fn removed_external_otel_keys_are_inert() {
 }
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
-/// `requirements.toml` (deployment key + S3 trace upload) via the actual
+/// `requirements.toml` (deployment key) via the actual
 /// `ConfigLayers::effective_config()` path — must resolve the deployment-config
-/// fetch to cli-chat-proxy, never the model host, and must preserve the
-/// customer's S3 trace-upload endpoint.
+/// fetch to cli-chat-proxy, never the model host. Legacy trace-upload endpoint
+/// keys in requirements are tolerated (parse without error) and ignored.
 #[test]
 #[serial_test::serial]
 fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
@@ -2649,10 +2649,6 @@ trace_upload_endpoint_url = "https://s3.acme-corp.example"
         "https://cli-chat-proxy.grok.com/v1/deployment/config"
     );
     assert!(! cfg.endpoints.resolve_managed_config_url().contains("acme-corp"));
-    assert_eq!(
-        cfg.endpoints.trace_upload_endpoint_url.as_deref(),
-        Some("https://s3.acme-corp.example")
-    );
     assert!(cfg.endpoints.deployment_key.is_some());
 }
 #[test]
@@ -2735,7 +2731,6 @@ fn apply_requirements_value_overrides_user_settings() {
         "false")
     );
     assert_eq!(Some(false), cfg.requirements.trace_upload.pinned());
-    assert!(! cfg.is_trace_upload_enabled());
     assert_eq!(Some(false), cfg.cli.auto_update);
     assert!(! cfg.ui.yolo);
     assert!(! cfg.default_yolo_mode);
@@ -2758,17 +2753,11 @@ fn apply_requirements_value_overrides_user_settings() {
     assert!(
         enforced.iter().any(| e | e.path == "ui.yolo" && e.value == "--yolo blocked")
     );
-    assert_eq!(
-        Some("https://s3.custom.example.com"), cfg.endpoints.trace_upload_endpoint_url
-        .as_deref()
-    );
+    // Removed trace-upload endpoint keys are ignored: no config fields exist
+    // for them anymore and no enforcement records are produced.
     assert!(
-        cfg.endpoints.trace_upload_credentials.is_some(),
-        "trace_upload_credentials should be set"
-    );
-    assert!(
-        enforced.iter().any(| e | e.path == "endpoints.trace_upload_credentials" && e
-        .value == "[redacted]")
+        enforced.iter().all(| e | ! e.path.starts_with("endpoints.trace_upload")),
+        "removed trace-upload endpoint keys must not produce enforcement records"
     );
     assert_eq!(
         Some("enterprise-deploy-key-should-not-log"), cfg.endpoints.deployment_key

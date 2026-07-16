@@ -40,9 +40,6 @@ dirs = { workspace = true }
 # the product telemetry event share the same enum surface. Semantically this enum
 # lives with the events module in data-collector; not worth a third crate.
 xai-file-utils = { path = "../xai-file-utils" }
-# `session_metrics::TraceUploadReason::from_upload_method` matches on the shared
-# `UploadMethod` enum (small, dependency-light types crate) so the reason->wire
-# mapping lives next to the trace-upload lifecycle events it labels.
 whoami = { workspace = true }
 uuid = { workspace = true, features = ["v5", "v7"] }
 mid = "4.0.0"

@@ -1,23 +1,15 @@
-//! Threshold-triggered jemalloc heap dump + upload.
+//! Threshold-triggered jemalloc heap dump, persisted locally.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::AuthManager;
-use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
-use crate::upload::gcs::WithAuth as _;
-
-/// Hard skip-cap for dump uploads (K4). Allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`.
+/// Hard skip-cap for dumps (K4). Allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`.
 pub const HARD_DUMP_SIZE_CAP_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Wall budget for `prof.dump` in `spawn_blocking` (K6).
 pub const DUMP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Wall budget for GCS heap+meta upload so a stalled proxy cannot pin
-/// `upload_in_flight` for the process lifetime (blocks later threshold dumps).
-pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Scoped kill-switch poll cadence while profiling is enabled (K12).
 pub const SCOPED_KILL_SWITCH_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -45,25 +37,16 @@ impl Default for JemallocHeapProfileConfig {
     }
 }
 
-/// Auth/endpoint snapshot needed for `gcs::upload_file` via `with_auth`.
-#[derive(Clone)]
-pub struct HeapProfileUploadHandles {
-    pub auth_manager: Arc<AuthManager>,
-    /// `None` for proxy-mode uploads, which don't target a bucket directly.
-    pub bucket_url: Option<String>,
-    pub upload_method: UploadMethod,
-}
-
 /// Outcome of one threshold dump attempt (for latch decisions / tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DumpAttemptOutcome {
-    /// Missing session or upload handles — do not latch (K6 / defer).
+    /// Missing session — do not latch (K6 / defer).
     Deferred,
     DumpFailed,
     DumpTimeout,
     SizeCap,
-    UploadOk,
-    UploadFailed,
+    PersistOk,
+    PersistFailed,
 }
 
 /// Whether a dump-attempt outcome should latch the threshold (K6).
@@ -127,7 +110,6 @@ pub fn resolve_jemalloc_heap_profile(
     remote_thresholds: Option<&[u64]>,
     remote_poll_interval_secs: Option<u64>,
     data_collection_disabled: bool,
-    trace_upload_enabled: bool,
     prof_available: bool,
 ) -> JemallocHeapProfileConfig {
     let thresholds = match remote_thresholds {
@@ -137,7 +119,6 @@ pub fn resolve_jemalloc_heap_profile(
     let enabled = remote_enabled == Some(true)
         && !thresholds.is_empty()
         && !data_collection_disabled
-        && trace_upload_enabled
         && prof_available;
     JemallocHeapProfileConfig {
         enabled,
@@ -146,29 +127,35 @@ pub fn resolve_jemalloc_heap_profile(
     }
 }
 
-/// Process-lifetime latch + dump/upload orchestration for heap profiles.
+/// Process-lifetime latch + dump/persist orchestration for heap profiles.
 pub struct HeapProfileMonitor {
     latched: BTreeSet<u64>,
     config: JemallocHeapProfileConfig,
     /// Sticky UUID; set only via [`set_session_id`].
     session_id: Option<Arc<str>>,
     upload_in_flight: bool,
-    upload_handles: Option<Arc<HeapProfileUploadHandles>>,
+    /// Local directory heap profiles are persisted under.
+    persist_dir: PathBuf,
     dump_fn: fn(&Path) -> Result<(), String>,
     stats_fn: fn() -> Option<super::JemallocStats>,
     set_prof_active_fn: fn(bool) -> bool,
     sample_rss_fn: fn() -> u64,
-    test_upload: Option<Arc<TestUploadFn>>,
+    test_persist: Option<Arc<TestPersistFn>>,
     dump_timeout: Duration,
 }
 
-type TestUploadFn = dyn Fn(
+type TestPersistFn = dyn Fn(
         &str,
         &Path,
         &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
     + Send
     + Sync;
+
+/// Default local directory for persisted heap profiles.
+pub fn default_persist_dir() -> PathBuf {
+    crate::util::grok_home::grok_home().join("heap_profiles")
+}
 
 impl Default for HeapProfileMonitor {
     fn default() -> Self {
@@ -183,12 +170,12 @@ impl HeapProfileMonitor {
             config: JemallocHeapProfileConfig::default(),
             session_id: None,
             upload_in_flight: false,
-            upload_handles: None,
+            persist_dir: default_persist_dir(),
             dump_fn: super::dump_to_path,
             stats_fn: super::stats,
             set_prof_active_fn: super::set_prof_active,
             sample_rss_fn: crate::session::signals::sample_rss_bytes,
-            test_upload: None,
+            test_persist: None,
             dump_timeout: DUMP_TIMEOUT,
         }
     }
@@ -213,16 +200,11 @@ impl HeapProfileMonitor {
         self.upload_in_flight = false;
     }
 
-    /// Apply resolved config + upload handles; toggle sampling. Does not touch
+    /// Apply resolved config; toggle sampling. Does not touch
     /// sticky `session_id` or clear latches.
-    pub fn reconfigure(
-        &mut self,
-        config: JemallocHeapProfileConfig,
-        upload_handles: Option<HeapProfileUploadHandles>,
-    ) {
+    pub fn reconfigure(&mut self, config: JemallocHeapProfileConfig) {
         let was_enabled = self.config.enabled;
         self.config = config;
-        self.upload_handles = upload_handles.map(Arc::new);
         let active = self.config.enabled;
         let ok = (self.set_prof_active_fn)(active);
         tracing::debug!(
@@ -276,15 +258,6 @@ impl HeapProfileMonitor {
             return None;
         };
 
-        if self.upload_handles.is_none() && self.test_upload.is_none() {
-            tracing::debug!(
-                threshold,
-                reason = "no_upload_handles",
-                "heap_profile: skipped"
-            );
-            return None;
-        }
-
         self.upload_in_flight = true;
         Some(PendingDump {
             threshold,
@@ -293,8 +266,8 @@ impl HeapProfileMonitor {
             rss_peak: (self.sample_rss_fn)(),
             dump_fn: self.dump_fn,
             dump_timeout: self.dump_timeout,
-            upload_handles: self.upload_handles.clone(),
-            test_upload: self.test_upload.clone(),
+            persist_dir: self.persist_dir.clone(),
+            test_persist: self.test_persist.clone(),
         })
     }
 
@@ -334,8 +307,13 @@ impl HeapProfileMonitor {
         self.dump_timeout = timeout;
     }
 
+    /// Override the local persist directory (tests).
+    pub fn set_persist_dir(&mut self, dir: PathBuf) {
+        self.persist_dir = dir;
+    }
+
     #[cfg(test)]
-    pub(crate) fn set_test_upload<F>(&mut self, f: F)
+    pub(crate) fn set_test_persist<F>(&mut self, f: F)
     where
         F: Fn(
                 &str,
@@ -347,7 +325,7 @@ impl HeapProfileMonitor {
             + Sync
             + 'static,
     {
-        self.test_upload = Some(Arc::new(f));
+        self.test_persist = Some(Arc::new(f));
     }
 
     #[cfg(test)]
@@ -364,13 +342,13 @@ pub struct PendingDump {
     rss_peak: u64,
     dump_fn: fn(&Path) -> Result<(), String>,
     dump_timeout: Duration,
-    upload_handles: Option<Arc<HeapProfileUploadHandles>>,
-    test_upload: Option<Arc<TestUploadFn>>,
+    persist_dir: PathBuf,
+    test_persist: Option<Arc<TestPersistFn>>,
 }
 
 impl PendingDump {
-    /// Dump + upload off the monitor borrow. On timeout, awaits the dump join
-    /// before returning so in-flight stays set until the private dir is safe.
+    /// Dump + local persist off the monitor borrow. On timeout, awaits the dump
+    /// join before returning so in-flight stays set until the private dir is safe.
     pub async fn execute(self) -> DumpAttemptOutcome {
         let threshold = self.threshold;
         let stats = self.stats;
@@ -498,48 +476,33 @@ impl PendingDump {
             return DumpAttemptOutcome::DumpFailed;
         }
 
-        let upload_ok = match tokio::time::timeout(
-            UPLOAD_TIMEOUT,
-            upload_pair(
-                self.test_upload.as_deref(),
-                self.upload_handles.as_deref(),
-                &heap_object,
-                &temp_path,
-                "application/octet-stream",
-                &meta_object,
-                &meta_path,
-                "application/json",
-                file_size,
-            ),
+        let persist_ok = persist_pair(
+            self.test_persist.as_deref(),
+            &self.persist_dir,
+            &heap_object,
+            &temp_path,
+            "application/octet-stream",
+            &meta_object,
+            &meta_path,
+            "application/json",
+            file_size,
         )
-        .await
-        {
-            Ok(ok) => ok,
-            Err(_) => {
-                tracing::warn!(
-                    object_path = %heap_object,
-                    bytes = file_size,
-                    "heap_profile: upload_timeout"
-                );
-                false
-            }
-        };
+        .await;
 
-        if upload_ok {
-            DumpAttemptOutcome::UploadOk
+        if persist_ok {
+            DumpAttemptOutcome::PersistOk
         } else {
-            DumpAttemptOutcome::UploadFailed
+            DumpAttemptOutcome::PersistFailed
         }
     }
 }
 
-fn log_upload_result(heap_object: &str, file_size: u64, ok: bool, err: Option<&str>) -> bool {
+fn log_persist_result(heap_object: &str, file_size: u64, ok: bool, err: Option<&str>) -> bool {
     if ok {
         tracing::info!(
             object_path = %heap_object,
             bytes = file_size,
-            multipart = file_size > xai_file_utils::gcs::MULTIPART_UPLOAD_THRESHOLD,
-            "heap_profile: upload_ok"
+            "heap_profile: persist_ok"
         );
         true
     } else {
@@ -547,15 +510,27 @@ fn log_upload_result(heap_object: &str, file_size: u64, ok: bool, err: Option<&s
             object_path = %heap_object,
             bytes = file_size,
             error = err.unwrap_or("unknown"),
-            "heap_profile: upload_failed"
+            "heap_profile: persist_failed"
         );
         false
     }
 }
 
-async fn upload_pair(
-    test_upload: Option<&TestUploadFn>,
-    handles: Option<&HeapProfileUploadHandles>,
+/// Copy `src` to `persist_dir/relative` (creating parents).
+fn persist_file(persist_dir: &Path, relative: &str, src: &Path) -> Result<(), String> {
+    let dest = persist_dir.join(relative);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Copy (not rename): the source lives in a private temp dir that may be
+    // on a different filesystem.
+    std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn persist_pair(
+    test_persist: Option<&TestPersistFn>,
+    persist_dir: &Path,
     heap_object: &str,
     heap_path: &Path,
     heap_ct: &str,
@@ -564,44 +539,23 @@ async fn upload_pair(
     meta_ct: &str,
     file_size: u64,
 ) -> bool {
-    // Short-circuit on heap failure: do not upload orphan `.meta.json`.
-    if let Some(hook) = test_upload {
+    // Short-circuit on heap failure: do not persist an orphan `.meta.json`.
+    if let Some(hook) = test_persist {
         if let Err(e) = hook(heap_object, heap_path, heap_ct).await {
-            return log_upload_result(heap_object, file_size, false, Some(&e));
+            return log_persist_result(heap_object, file_size, false, Some(&e));
         }
         return match hook(meta_object, meta_path, meta_ct).await {
-            Ok(()) => log_upload_result(heap_object, file_size, true, None),
-            Err(e) => log_upload_result(heap_object, file_size, false, Some(&e)),
+            Ok(()) => log_persist_result(heap_object, file_size, true, None),
+            Err(e) => log_persist_result(heap_object, file_size, false, Some(&e)),
         };
     }
 
-    let Some(handles) = handles else {
-        tracing::warn!(
-            object_path = %heap_object,
-            reason = "no_upload_handles",
-            "heap_profile: upload_failed"
-        );
-        return false;
-    };
-
-    let gcs_config = TraceExportConfig {
-        bucket_url: handles.bucket_url.clone(),
-        service_account_key: None,
-        prefix_dir: None,
-        gcs_prefix: None,
-        absolute_paths: false,
-        archive_name_override: None,
-        upload_method: handles.upload_method.clone(),
-    };
-    let config = gcs_config.with_auth(Some(Arc::clone(&handles.auth_manager)));
-
-    if let Err(e) = xai_file_utils::gcs::upload_file(&config, heap_object, heap_path, heap_ct).await
-    {
-        return log_upload_result(heap_object, file_size, false, Some(&e.to_string()));
+    if let Err(e) = persist_file(persist_dir, heap_object, heap_path) {
+        return log_persist_result(heap_object, file_size, false, Some(&e));
     }
-    match xai_file_utils::gcs::upload_file(&config, meta_object, meta_path, meta_ct).await {
-        Ok(_) => log_upload_result(heap_object, file_size, true, None),
-        Err(e) => log_upload_result(heap_object, file_size, false, Some(&e.to_string())),
+    match persist_file(persist_dir, meta_object, meta_path) {
+        Ok(()) => log_persist_result(heap_object, file_size, true, None),
+        Err(e) => log_persist_result(heap_object, file_size, false, Some(&e)),
     }
 }
 
@@ -649,18 +603,6 @@ fn write_exclusive_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut f = opts.open(path)?;
     f.write_all(bytes)?;
     Ok(())
-}
-
-pub fn build_upload_handles(
-    auth_manager: Arc<AuthManager>,
-    bucket_url: Option<String>,
-    upload_method: UploadMethod,
-) -> HeapProfileUploadHandles {
-    HeapProfileUploadHandles {
-        auth_manager,
-        bucket_url,
-        upload_method,
-    }
 }
 
 #[cfg(test)]
@@ -739,9 +681,9 @@ mod tests {
 
     fn ready_monitor(thresholds: &[u64]) -> HeapProfileMonitor {
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(thresholds), None);
+        mon.reconfigure(enabled_config(thresholds));
         mon.set_session_id(SID.to_owned());
-        mon.set_test_upload(|_, _, _| Box::pin(async { Ok(()) }));
+        mon.set_test_persist(|_, _, _| Box::pin(async { Ok(()) }));
         mon
     }
 
@@ -799,56 +741,24 @@ mod tests {
     #[test]
     fn resolve_gates_require_all_conditions() {
         let thresholds = [2u64 * 1024 * 1024 * 1024];
-        let c = resolve_jemalloc_heap_profile(
-            Some(true),
-            Some(&thresholds),
-            Some(30),
-            false,
-            true,
-            true,
-        );
+        let c = resolve_jemalloc_heap_profile(Some(true), Some(&thresholds), Some(30), false, true);
         assert!(c.enabled);
         assert_eq!(c.thresholds, thresholds);
 
-        assert!(!resolve_jemalloc_heap_profile(
-            Some(false),
-            Some(&thresholds),
-            None,
-            false,
-            true,
-            true,
-        )
-        .enabled);
         assert!(
-            !resolve_jemalloc_heap_profile(None, Some(&thresholds), None, false, true, true)
+            !resolve_jemalloc_heap_profile(Some(false), Some(&thresholds), None, false, true,)
                 .enabled
         );
+        assert!(!resolve_jemalloc_heap_profile(None, Some(&thresholds), None, false, true).enabled);
+        assert!(!resolve_jemalloc_heap_profile(Some(true), Some(&[]), None, false, true).enabled);
+        assert!(!resolve_jemalloc_heap_profile(Some(true), None, None, false, true).enabled);
         assert!(
-            !resolve_jemalloc_heap_profile(Some(true), Some(&[]), None, false, true, true).enabled
+            !resolve_jemalloc_heap_profile(Some(true), Some(&thresholds), None, true, true).enabled
         );
-        assert!(!resolve_jemalloc_heap_profile(Some(true), None, None, false, true, true).enabled);
         assert!(
-            !resolve_jemalloc_heap_profile(Some(true), Some(&thresholds), None, true, true, true)
+            !resolve_jemalloc_heap_profile(Some(true), Some(&thresholds), None, false, false,)
                 .enabled
         );
-        assert!(!resolve_jemalloc_heap_profile(
-            Some(true),
-            Some(&thresholds),
-            None,
-            false,
-            false,
-            true,
-        )
-        .enabled);
-        assert!(!resolve_jemalloc_heap_profile(
-            Some(true),
-            Some(&thresholds),
-            None,
-            false,
-            true,
-            false,
-        )
-        .enabled);
     }
 
     #[test]
@@ -857,8 +767,8 @@ mod tests {
         assert!(should_latch(DumpAttemptOutcome::DumpFailed));
         assert!(should_latch(DumpAttemptOutcome::DumpTimeout));
         assert!(should_latch(DumpAttemptOutcome::SizeCap));
-        assert!(should_latch(DumpAttemptOutcome::UploadOk));
-        assert!(should_latch(DumpAttemptOutcome::UploadFailed));
+        assert!(should_latch(DumpAttemptOutcome::PersistOk));
+        assert!(should_latch(DumpAttemptOutcome::PersistFailed));
     }
 
     #[test]
@@ -870,7 +780,7 @@ mod tests {
         assert_eq!(mon.session_id(), Some(SID));
         mon.set_session_id("22222222-2222-4222-8222-222222222222".into());
         assert_eq!(mon.session_id(), Some(SID));
-        mon.reconfigure(enabled_config(&[1]), None);
+        mon.reconfigure(enabled_config(&[1]));
         assert_eq!(mon.session_id(), Some(SID));
     }
 
@@ -879,8 +789,8 @@ mod tests {
     async fn defer_no_session_does_not_latch() {
         reset();
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
-        mon.set_test_upload(|_, _, _| Box::pin(async { Ok(()) }));
+        mon.reconfigure(enabled_config(&[100]));
+        mon.set_test_persist(|_, _, _| Box::pin(async { Ok(()) }));
         assert!(TEST_PROF_ACTIVE.load(Ordering::SeqCst));
         TEST_RESIDENT.store(200, Ordering::SeqCst);
         mon.poll_tick().await;
@@ -890,16 +800,26 @@ mod tests {
 
     #[tokio::test]
     #[serial(heap_profile_monitor)]
-    async fn defer_no_upload_handles_does_not_latch() {
+    async fn persists_locally_without_test_hook() {
         reset();
+        let dir = tempfile::TempDir::new().expect("persist dir");
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
+        mon.reconfigure(enabled_config(&[100]));
         mon.set_session_id(SID.to_owned());
+        mon.set_persist_dir(dir.path().to_path_buf());
         TEST_RESIDENT.store(200, Ordering::SeqCst);
         mon.poll_tick().await;
-        assert!(mon.latched().is_empty());
-        assert!(LAST_DUMP_PATH.lock().unwrap().is_none());
+        assert!(mon.latched().contains(&100));
         assert!(!mon.upload_in_flight());
+        let jemalloc_dir = dir.path().join(SID).join("jemalloc");
+        let mut names: Vec<String> = std::fs::read_dir(&jemalloc_dir)
+            .expect("jemalloc dir exists")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "heap + meta persisted: {names:?}");
+        assert!(names[0].ends_with(".heap"));
+        assert!(names[1].ends_with(".meta.json"));
     }
 
     #[tokio::test]
@@ -924,9 +844,9 @@ mod tests {
         let uploads = Arc::new(AtomicU64::new(0));
         let u = uploads.clone();
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
+        mon.reconfigure(enabled_config(&[100]));
         mon.set_session_id(SID.to_owned());
-        mon.set_test_upload(move |_, _, _| {
+        mon.set_test_persist(move |_, _, _| {
             u.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         });
@@ -955,9 +875,9 @@ mod tests {
         let uploads = Arc::new(AtomicU64::new(0));
         let u = uploads.clone();
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
+        mon.reconfigure(enabled_config(&[100]));
         mon.set_session_id(SID.to_owned());
-        mon.set_test_upload(move |_, _, _| {
+        mon.set_test_persist(move |_, _, _| {
             u.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         });
@@ -972,9 +892,9 @@ mod tests {
     async fn latch_on_upload_failure() {
         reset();
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
+        mon.reconfigure(enabled_config(&[100]));
         mon.set_session_id(SID.to_owned());
-        mon.set_test_upload(|_, _, _| Box::pin(async { Err("boom".into()) }));
+        mon.set_test_persist(|_, _, _| Box::pin(async { Err("boom".into()) }));
         TEST_RESIDENT.store(200, Ordering::SeqCst);
         mon.poll_tick().await;
         assert!(mon.latched().contains(&100));
@@ -985,11 +905,11 @@ mod tests {
     async fn latch_on_upload_success() {
         reset();
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
+        mon.reconfigure(enabled_config(&[100]));
         mon.set_session_id(SID.to_owned());
         let uploads = Arc::new(Mutex::new(Vec::<String>::new()));
         let u = uploads.clone();
-        mon.set_test_upload(move |obj, _, _| {
+        mon.set_test_persist(move |obj, _, _| {
             u.lock().unwrap().push(obj.to_owned());
             Box::pin(async { Ok(()) })
         });
@@ -1022,7 +942,7 @@ mod tests {
         reset();
         let mut mon = ready_monitor(&[100]);
         assert!(TEST_PROF_ACTIVE.load(Ordering::SeqCst));
-        mon.reconfigure(JemallocHeapProfileConfig::default(), None);
+        mon.reconfigure(JemallocHeapProfileConfig::default());
         assert!(!TEST_PROF_ACTIVE.load(Ordering::SeqCst));
         TEST_RESIDENT.store(200, Ordering::SeqCst);
         mon.poll_tick().await;
@@ -1046,8 +966,8 @@ mod tests {
     async fn session_arrives_later_allows_dump() {
         reset();
         let mut mon = monitor();
-        mon.reconfigure(enabled_config(&[100]), None);
-        mon.set_test_upload(|_, _, _| Box::pin(async { Ok(()) }));
+        mon.reconfigure(enabled_config(&[100]));
+        mon.set_test_persist(|_, _, _| Box::pin(async { Ok(()) }));
         TEST_RESIDENT.store(200, Ordering::SeqCst);
         mon.poll_tick().await;
         assert!(mon.latched().is_empty());

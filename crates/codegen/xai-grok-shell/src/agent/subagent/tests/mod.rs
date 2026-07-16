@@ -1097,8 +1097,6 @@ fn dummy_tracker(
         initial_client_mcp_servers: vec![],
         display_cwd: None,
         feedback_manager: Arc::new(feedback_manager),
-        upload_queue: Arc::new(OnceLock::new()),
-        upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_context,
         model_id: acp::ModelId::new("test"),
         reasoning_effort: None,
@@ -2756,19 +2754,6 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
         .child_handle;
     let meta_dir = std::env::temp_dir()
         .join(format!("subagent-promote-test-{subagent_id}"));
-    let gcs_ctx = GcsUploadContext {
-        bucket_url: None,
-        upload_method: None,
-        model_id: None,
-        cwd: None,
-        isolation_mode: None,
-        capability_mode: None,
-        reasoning_effort: None,
-        role_name: None,
-        parent_prompt_id: None,
-        depth: 0,
-        auth_manager: ctx.auth_manager.clone(),
-    };
     cancel_pending_subagent_at_promote(
             request,
             &child_handle,
@@ -2782,7 +2767,6 @@ async fn cancel_pending_subagent_at_promote_emits_exactly_one_cancelled_finish()
             None,
             false,
             42,
-            &gcs_ctx,
         )
         .await;
     let mut persisted = 0;
@@ -2856,19 +2840,6 @@ async fn run_promote_cancel_with_worktree(
     let child_handle = dummy_tracker(&subagent_id, "test-parent", "explore", "task")
         .child_handle;
     let meta_dir = std::env::temp_dir().join(format!("subagent-wt-test-{subagent_id}"));
-    let gcs_ctx = GcsUploadContext {
-        bucket_url: None,
-        upload_method: None,
-        model_id: None,
-        cwd: None,
-        isolation_mode: None,
-        capability_mode: None,
-        reasoning_effort: None,
-        role_name: None,
-        parent_prompt_id: None,
-        depth: 0,
-        auth_manager: ctx.auth_manager.clone(),
-    };
     cancel_pending_subagent_at_promote(
             request,
             &child_handle,
@@ -2882,7 +2853,6 @@ async fn run_promote_cancel_with_worktree(
             Some(worktree),
             worktree_freshly_created,
             42,
-            &gcs_ctx,
         )
         .await;
     let mut persisted = 0;

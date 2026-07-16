@@ -5,47 +5,19 @@
 //! `remote_settings` rewrite, no `re_resolve_runtime_fields` / telemetry re-init).
 
 use super::*;
-use crate::heap_profile::{SCOPED_KILL_SWITCH_INTERVAL, build_upload_handles};
+use crate::heap_profile::SCOPED_KILL_SWITCH_INTERVAL;
 
 impl MvpAgent {
     pub(super) fn reconfigure_heap_profile_monitor(&self) {
         let zdr = self.is_data_collection_disabled();
         let config = self.cfg.borrow().resolve_jemalloc_heap_profile(zdr);
-        let handles = self.heap_profile_upload_handles();
-        self.heap_profile_monitor
-            .borrow_mut()
-            .reconfigure(config, handles);
+        self.heap_profile_monitor.borrow_mut().reconfigure(config);
     }
 
     pub(super) fn heap_profile_set_session_id(&self, session_id: &str) {
         self.heap_profile_monitor
             .borrow_mut()
             .set_session_id(session_id.to_owned());
-    }
-
-    fn heap_profile_upload_handles(&self) -> Option<crate::heap_profile::HeapProfileUploadHandles> {
-        let method = self.trace_upload_config_snapshot()?;
-        let bucket_url = self
-            .cfg
-            .borrow()
-            .endpoints
-            .resolve_trace_bucket_url()
-            .map(|r| r.value);
-        // Only direct GCS uploads need a bucket.
-        if bucket_url.is_none()
-            && matches!(
-                method,
-                crate::session::repo_changes::UploadMethod::Direct { .. }
-            )
-        {
-            tracing::debug!("no trace bucket configured; heap-profile uploads disabled");
-            return None;
-        }
-        Some(build_upload_handles(
-            Arc::clone(&self.auth_manager),
-            bucket_url,
-            method,
-        ))
     }
 
     /// Background poll + scoped kill-switch (agent entrypoints only).
@@ -165,10 +137,9 @@ impl MvpAgent {
                 self.is_data_collection_disabled(),
             );
 
-        let handles = self.heap_profile_upload_handles();
         self.heap_profile_monitor
             .borrow_mut()
-            .reconfigure(resolved, handles);
+            .reconfigure(resolved);
     }
 }
 
@@ -239,7 +210,6 @@ mod tests {
                 .and_then(|s| s.jemalloc_heap_profile_poll_interval_secs),
             false,
             true,
-            true,
         );
         assert!(!free.enabled);
         assert_eq!(
@@ -258,7 +228,6 @@ mod tests {
             Some(&thresholds),
             Some(15),
             false,
-            true,
             true,
         );
         assert!(free.enabled);
@@ -305,8 +274,9 @@ mod tests {
         });
 
         let full = cfg.resolve_jemalloc_heap_profile(false);
-        // Without installed hooks, prof_available is false → disabled.
-        assert!(!full.enabled);
+        // Enabled tracks the live prof_available() gate (another test in this
+        // binary may have installed fake hooks first — OnceLock first-wins).
+        assert_eq!(full.enabled, crate::heap_profile::prof_available());
         assert_eq!(full.poll_interval, std::time::Duration::from_secs(45));
         assert_eq!(full.thresholds, vec![100, 200]);
 
@@ -334,7 +304,6 @@ mod tests {
             Some(&thresholds),
             Some(45),
             false,
-            true,
             true,
         );
         assert!(free.enabled);

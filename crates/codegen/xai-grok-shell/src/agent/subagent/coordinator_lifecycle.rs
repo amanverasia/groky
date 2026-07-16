@@ -14,12 +14,6 @@ use crate::session::{
 };
 use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
-};
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
@@ -34,7 +28,6 @@ impl SubagentCoordinator {
             completion_notify: Arc::new(Notify::new()),
             pending_completions: Vec::new(),
             is_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            synthetic_trace_tx: None,
             running_gauge: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             block_wait_slots: HashMap::new(),
             subagent_usage_not_applied_prompts: std::collections::HashSet::new(),
@@ -173,41 +166,6 @@ impl SubagentCoordinator {
     /// Drain all buffered completion summaries, returning them and clearing the buffer.
     pub fn drain_pending_completions(&mut self) -> Vec<SubagentCompletionSummary> {
         std::mem::take(&mut self.pending_completions)
-    }
-    /// Collect references to subagents spawned for a specific parent prompt.
-    /// Returns only the children whose `parent_prompt_id` matches, so the
-    /// parent turn's `turn_result.json` accurately reflects what was spawned
-    /// during that turn — not the entire coordinator lifetime.
-    pub fn spawned_refs_for_prompt(&self, prompt_id: &str) -> Vec<SubagentSpawnedRef> {
-        let mut refs: Vec<_> = self
-            .active
-            .values()
-            .filter(|t| t.parent_prompt_id.as_deref() == Some(prompt_id))
-            .map(|t| SubagentSpawnedRef {
-                subagent_id: t.subagent_id.clone(),
-                child_session_id: t.child_session_id.0.to_string(),
-                subagent_type: t.subagent_type.clone(),
-                description: t.description.clone(),
-                persona: t.persona.clone(),
-                resumed_from: t.resumed_from.clone(),
-            })
-            .chain(
-                self
-                    .completed
-                    .values()
-                    .filter(|c| c.parent_prompt_id.as_deref() == Some(prompt_id))
-                    .map(|c| SubagentSpawnedRef {
-                        subagent_id: c.subagent_id.clone(),
-                        child_session_id: c.child_session_id.clone(),
-                        subagent_type: c.subagent_type.clone(),
-                        description: c.description.clone(),
-                        persona: c.persona.clone(),
-                        resumed_from: c.resumed_from.clone(),
-                    }),
-            )
-            .collect();
-        refs.sort_by(|a, b| a.subagent_id.cmp(&b.subagent_id));
-        refs
     }
     /// Register a subagent as pending (initializing). Call this early,
     /// before any blocking work like worktree creation, so that

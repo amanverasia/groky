@@ -66,8 +66,6 @@ impl SessionActor {
             prompt_id,
             prompt_blocks,
             prompt_mode,
-            trace_gcs_config: None,
-            artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
             verbatim: false,

@@ -233,10 +233,6 @@ pub struct FeedbackManager {
     config: FeedbackManagerConfig,
     /// Whether config has been loaded from server
     config_loaded: Arc<AtomicBool>,
-    /// GCS upload queue stats for periodic snapshots into signals.
-    /// Set once after the first upload queue is created via `set_upload_queue_stats()`.
-    /// `OnceLock` because `FeedbackManager` is behind `Arc` and this is set after construction.
-    upload_queue_stats: std::sync::OnceLock<Arc<xai_file_utils::queue::UploadQueueStats>>,
 }
 
 impl FeedbackManager {
@@ -271,22 +267,12 @@ impl FeedbackManager {
             feedback_client,
             config,
             config_loaded: Arc::new(AtomicBool::new(false)),
-            upload_queue_stats: std::sync::OnceLock::new(),
         }
     }
 
     /// Create a feedback manager without a REST client (local tracking only).
     pub fn local_only(session_id: impl Into<String>) -> Self {
         Self::new(session_id, None, FeedbackManagerConfig::default())
-    }
-
-    /// Attach GCS upload queue stats for periodic snapshotting into signals.
-    ///
-    /// Called once after the first upload queue is created. The Arc is stored
-    /// and read (via atomic loads) before each signal sync to populate GCS
-    /// queue metrics. Safe to call from `&self` (behind Arc) via OnceLock.
-    pub fn set_upload_queue_stats(&self, stats: Arc<xai_file_utils::queue::UploadQueueStats>) {
-        let _ = self.upload_queue_stats.set(stats);
     }
 
     /// Get a clone of the signals handle for tracking events.
@@ -352,16 +338,6 @@ impl FeedbackManager {
         submission.context_tokens_used = Some(signals.context_tokens_used);
         submission.context_window_tokens = Some(signals.context_window_tokens);
         submission.client_version = session_data.client_version;
-
-        // Point to the per-turn unified log already uploaded by
-        // complete_prompt_trace. Only set when trace uploads are active
-        // Stats are set inside get_or_init; presence implies the queue exists.
-        // The session actor has no agent config; use the compiled-in default
-        // bucket. The ACP feedback extension path resolves the runtime bucket.
-        if submission.unified_log_url.is_none() && self.upload_queue_stats.get().is_some() {
-            submission.unified_log_url =
-                crate::upload::gcs::unified_log_url(None, &self.session_id, turn_number);
-        }
 
         if let Some(user_meta) =
             crate::agent::mvp_agent::parse_json_object_env("GROK_USER_METADATA")
@@ -709,12 +685,6 @@ impl FeedbackManager {
             return Ok(()); // Not time to sync yet
         }
 
-        // Snapshot GCS upload queue stats into signals before taking the snapshot.
-        // This ensures the sync payload includes the latest queue metrics.
-        if let Some(stats) = self.upload_queue_stats.get() {
-            self.signals_handle.snapshot_gcs_queue(stats);
-        }
-
         let Some(signals) = self.signals_handle.snapshot().await else {
             return Ok(()); // Actor shut down
         };
@@ -862,38 +832,9 @@ impl FeedbackManager {
     /// 1. Final signal sync to the analytics backend (bypass cooldown)
     /// 2. Upload queue is drained (pending uploads complete before exit)
     /// 3. Signals actor is shut down
-    ///
-    /// The drain uses a configurable timeout (`config.drain_timeout`) to avoid
-    /// hanging indefinitely on stuck uploads. Items not uploaded within the
-    /// timeout are abandoned with a warning log.
-    ///
-    /// The caller passes the upload queue from `SessionHandle` — the
-    /// `FeedbackManager` no longer owns the queue.
-    pub async fn shutdown(&self, queue: Option<&xai_file_utils::queue::UploadQueue>) {
+    pub async fn shutdown(&self) {
         // Final sync — force-bypass cooldown
         let _ = self.force_sync_signals().await;
-
-        // Drain the upload queue to ensure pending uploads complete before exit.
-        // Uses configurable timeout to avoid hanging indefinitely on stuck uploads.
-        if let Some(queue) = queue {
-            let remaining = queue.drain(self.config.drain_timeout).await;
-            if remaining > 0 {
-                let pending_bytes = queue.stats().pending_bytes.load(Ordering::Relaxed);
-                tracing::warn!(
-                    session_id = %self.session_id,
-                    remaining,
-                    pending_bytes,
-                    "Upload queue drain incomplete, {} items abandoned ({} bytes pending)",
-                    remaining,
-                    pending_bytes
-                );
-            } else {
-                tracing::debug!(
-                    session_id = %self.session_id,
-                    "Upload queue drained successfully"
-                );
-            }
-        }
 
         // Shutdown the signals actor
         self.signals_handle.shutdown();
@@ -1104,7 +1045,7 @@ mod tests {
             crate::session::feedback::FeedbackTier::Tier1
         );
 
-        manager.shutdown(None).await;
+        manager.shutdown().await;
     }
 
     #[test]
@@ -1202,60 +1143,16 @@ mod tests {
         let request = manager.maybe_request_feedback(None).await;
         assert!(request.is_none());
 
-        manager.shutdown(None).await;
+        manager.shutdown().await;
     }
 
     #[tokio::test]
-    async fn test_shutdown_without_upload_queue_completes() {
-        // Verify that shutdown() completes successfully when no upload queue is set.
-        // This tests the None path in the drain logic.
+    async fn test_shutdown_completes() {
         let manager = FeedbackManager::local_only("test-session-no-queue");
 
-        // Shutdown should complete without errors even without an upload queue
-        manager.shutdown(None).await;
+        manager.shutdown().await;
 
         // Verify signals actor was shut down (snapshot returns None after shutdown)
-        let snapshot = manager.signals_handle().snapshot().await;
-        assert!(snapshot.is_none(), "Signals actor should be shut down");
-    }
-
-    #[tokio::test]
-    async fn test_shutdown_with_upload_queue_drains() {
-        use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
-        use std::sync::Arc;
-        use xai_file_utils::queue::{TraceExportSource, UploadQueue, UploadRetryPolicy};
-
-        // Create a mock resolver for the queue
-        struct MockResolver;
-        impl TraceExportSource for MockResolver {
-            fn resolve(&self) -> TraceExportConfig {
-                TraceExportConfig {
-                    bucket_url: Some("gs://test-bucket".to_string()),
-                    service_account_key: None,
-                    upload_method: UploadMethod::Direct {
-                        service_account_key: None,
-                    },
-                    prefix_dir: None,
-                    gcs_prefix: None,
-                    absolute_paths: false,
-                    archive_name_override: None,
-                }
-            }
-        }
-
-        let temp = tempfile::TempDir::new().unwrap();
-        let queue = UploadQueue::spawn(
-            temp.path(),
-            Arc::new(MockResolver),
-            UploadRetryPolicy::default(),
-        );
-
-        let manager = FeedbackManager::local_only("test-session-with-queue");
-
-        // Shutdown should complete and drain the queue
-        manager.shutdown(Some(&queue)).await;
-
-        // Verify signals actor was shut down
         let snapshot = manager.signals_handle().snapshot().await;
         assert!(snapshot.is_none(), "Signals actor should be shut down");
     }
@@ -1272,7 +1169,7 @@ mod tests {
         // Verify config was stored
         assert_eq!(manager.config.drain_timeout, Duration::from_secs(5));
 
-        manager.shutdown(None).await;
+        manager.shutdown().await;
     }
 
     // ── handle_auth_outcome tests ──────────────────────────────────────────

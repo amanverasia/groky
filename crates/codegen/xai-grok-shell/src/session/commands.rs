@@ -124,8 +124,6 @@ pub enum SessionCommand {
         prompt_blocks: Vec<acp::ContentBlock>,
         /// Prompt mode parsed from request `_meta.mode`.
         prompt_mode: PromptMode,
-        #[allow(private_interfaces)]
-        artifact_upload_ctx: Option<crate::upload::manifest::ArtifactUploadContext>,
         /// Optional client identifier from the prompt request meta (overrides session-level one)
         client_identifier: Option<String>,
         /// Optional screen mode from the prompt request meta (`_meta.screenMode`,

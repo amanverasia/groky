@@ -155,7 +155,7 @@ mod tests {
     /// through `EmitterOrigin::Shell`.
     #[test]
     fn shell_origin_event_name_matches_legacy_format() {
-        let suffix = "trace_upload_attempted";
+        let suffix = "session_started";
         let rerouted = format!("{}{}", EmitterOrigin::Shell.event_prefix(), suffix);
         let legacy = format!("grok-shell-{suffix}");
         assert_eq!(rerouted, legacy);

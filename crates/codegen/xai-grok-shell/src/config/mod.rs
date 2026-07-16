@@ -1164,11 +1164,6 @@ fn apply_requirements_inner(
     }
     enforce_str!(
         "endpoints",
-        "trace_upload_url",
-        config.endpoints.trace_upload_url
-    );
-    enforce_str!(
-        "endpoints",
         "feedback_base_url",
         config.endpoints.feedback_base_url
     );
@@ -1176,32 +1171,6 @@ fn apply_requirements_inner(
         "endpoints",
         "deployment_key",
         config.endpoints.deployment_key,
-        redacted
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_bucket",
-        config.endpoints.trace_upload_bucket
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_region",
-        config.endpoints.trace_upload_region
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials_file",
-        config.endpoints.trace_upload_credentials_file
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_endpoint_url",
-        config.endpoints.trace_upload_endpoint_url
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials",
-        config.endpoints.trace_upload_credentials,
         redacted
     );
     if let Some(val) = req.get("features").and_then(|f| f.get("codebase_indexing")) {

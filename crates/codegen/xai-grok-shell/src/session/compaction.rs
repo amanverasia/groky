@@ -2277,7 +2277,6 @@ mod inline_auto_compact_flow_tests {
             client_identifier: None,
             origin_client: None,
             feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-            upload_queue: Arc::new(OnceLock::new()),
             sync_loop_cancel: None,
             agent: std::cell::RefCell::new(test_agent_default().await),
             last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -2368,7 +2367,6 @@ mod inline_auto_compact_flow_tests {
             subagent_spawn_info: parking_lot::Mutex::new(std::collections::HashMap::new()),
             subagent_token_records: parking_lot::Mutex::new(std::collections::HashMap::new()),
             workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-            trace_config_template: std::cell::RefCell::new(None),
         }
     }
     /// Test check_auto_compact_needed uses state values.
