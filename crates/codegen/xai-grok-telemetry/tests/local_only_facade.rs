@@ -168,5 +168,16 @@ fn telemetry_mode_parse_policy() {
     assert_eq!(TelemetryMode::parse("   "), None);
     assert_eq!(TelemetryMode::parse("\t\n"), None);
     // Current policy: any non-empty string (even nonsense) parses to Disabled.
-    assert_eq!(TelemetryMode::parse("banana"), Some(TelemetryMode::Disabled));
+    assert_eq!(
+        TelemetryMode::parse("banana"),
+        Some(TelemetryMode::Disabled)
+    );
+}
+
+#[test]
+fn product_analytics_crate_is_absent() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    assert!(!root.join("crates/codegen/xai-mixpanel").exists());
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(!manifest.contains("xai-mixpanel"));
 }
