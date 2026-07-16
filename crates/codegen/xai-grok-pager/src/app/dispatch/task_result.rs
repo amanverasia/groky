@@ -583,6 +583,68 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::ProvidersListLoaded { result } => {
+            for agent in app.agents.values_mut() {
+                if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                    &mut agent.active_modal
+                {
+                    state.apply_list(result.clone());
+                }
+            }
+            vec![]
+        }
+        TaskResult::ProviderKeyStored {
+            provider_id,
+            result,
+        } => match result {
+            Ok(status) => {
+                for agent in app.agents.values_mut() {
+                    if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                        &mut agent.active_modal
+                    {
+                        state.apply_key_status(&provider_id, status);
+                    }
+                }
+                app.show_toast(&format!("Saved API key for {provider_id}"));
+                vec![]
+            }
+            Err(e) => {
+                app.show_toast(&e);
+                vec![]
+            }
+        },
+        TaskResult::ProviderKeyCleared {
+            provider_id,
+            result,
+        } => match result {
+            Ok(status) => {
+                for agent in app.agents.values_mut() {
+                    if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                        &mut agent.active_modal
+                    {
+                        state.apply_key_status(&provider_id, status);
+                    }
+                }
+                app.show_toast(&format!("Cleared API key for {provider_id}"));
+                vec![]
+            }
+            Err(e) => {
+                app.show_toast(&e);
+                vec![]
+            }
+        },
+        TaskResult::ProvidersRefreshRequested { result } => {
+            if let Ok(true) = result {
+                for agent in app.agents.values_mut() {
+                    if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                        &mut agent.active_modal
+                    {
+                        state.refresh_status = "refreshing".to_string();
+                    }
+                }
+            }
+            vec![]
+        }
         TaskResult::McpAuthTriggerDone {
             agent_id,
             server_name,

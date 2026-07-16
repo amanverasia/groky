@@ -358,6 +358,41 @@ impl AgentView {
             }
         }
 
+        // Providers: key entry owns its own Esc; otherwise route chrome first.
+        if let ActiveModal::Providers { state } = modal {
+            use crate::views::providers_modal::{self, ProvidersMode, ProvidersOutcome};
+            let entering = matches!(state.mode, ProvidersMode::EnteringKey { .. });
+            if !entering {
+                let chrome_cfg = mw::ModalWindowConfig {
+                    title: "",
+                    tabs: None,
+                    shortcuts: &[],
+                    sizing: mw::ModalSizing::default(),
+                    fold_info: None,
+                };
+                if matches!(
+                    mw::handle_modal_key(&mut state.window, key, &chrome_cfg),
+                    ModalWindowOutcome::CloseRequested
+                ) {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+            }
+            return match providers_modal::handle_providers_key(state, key) {
+                ProvidersOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ProvidersOutcome::CloseWithAction(action) => {
+                    self.active_modal = None;
+                    InputOutcome::Action(action)
+                }
+                ProvidersOutcome::Action(action) => InputOutcome::Action(action),
+                ProvidersOutcome::Changed => InputOutcome::Changed,
+                ProvidersOutcome::Unchanged => InputOutcome::Unchanged,
+            };
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let ActiveModal::MemoryBrowser { state } = modal {
             // When the filter input is focused, Esc exits filter mode
@@ -472,6 +507,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Providers { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
@@ -1461,6 +1497,20 @@ impl AgentView {
             }
         }
 
+        // Providers: modal chrome only (close button); rows are keyboard-driven.
+        if let Some(ActiveModal::Providers { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Handled => return InputOutcome::Changed,
+                _ => return InputOutcome::Unchanged,
+            }
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::MemoryBrowser { state }) = &mut self.active_modal {
             let outcome =
@@ -2235,6 +2285,17 @@ impl AgentView {
                 }
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Providers {
+                state: providers_state,
+            } = active_modal
+            {
+                crate::views::providers_modal::render_providers_overlay(
+                    buf,
+                    area,
+                    providers_state,
+                    compact,
+                    &theme,
+                );
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal

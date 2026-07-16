@@ -560,3 +560,25 @@ mod presence_aware_dto_tests {
         );
     }
 }
+
+/// Handle `x.ai/providers/update` — provider availability changed (key
+/// stored/cleared or catalog refreshed). Payload: `{ "providers": [rows] }`,
+/// secret-free. Replaces the rows of any open `/providers` modal.
+pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(update) =
+        serde_json::from_str::<crate::providers::ProviderListResponse>(notif.params.get())
+    else {
+        tracing::warn!("Failed to parse x.ai/providers/update");
+        return false;
+    };
+    let rows = crate::providers::provider_rows(&update);
+    let mut applied = false;
+    for agent in app.agents.values_mut() {
+        if let Some(crate::views::modal::ActiveModal::Providers { state }) = &mut agent.active_modal
+        {
+            state.apply_update(rows.clone());
+            applied = true;
+        }
+    }
+    applied
+}

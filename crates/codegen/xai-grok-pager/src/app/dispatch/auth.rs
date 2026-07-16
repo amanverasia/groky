@@ -170,6 +170,22 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
     }
 }
 
+/// Open the `/providers` picker: show the modal in loading state on the
+/// active agent view and fetch the provider list. Outside a session (no
+/// agent view to host the modal) fall back to the plain login flow so the
+/// welcome screen keeps its previous `/login` behavior.
+pub(super) fn dispatch_open_providers(app: &mut AppView) -> Vec<Effect> {
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.active_modal = Some(crate::views::modal::ActiveModal::Providers {
+            state: Box::new(crate::views::providers_modal::ProvidersModalState::loading()),
+        });
+        return vec![Effect::ListProviders];
+    }
+    dispatch_login(app)
+}
+
 /// Start an interactive login flow. Triggered by pressing 'l' on the
 /// welcome screen or by the `/login` slash command.
 ///

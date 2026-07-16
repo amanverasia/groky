@@ -2017,6 +2017,141 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::ListProviders => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({});
+                    let req = acp::ExtRequest::new(
+                        "x.ai/providers/list",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize providers/list params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let inner = wrapper.get("result").unwrap_or(&wrapper);
+                            serde_json::from_value::<
+                                crate::providers::ProviderListResponse,
+                            >(inner.clone())
+                                .map_err(|_| "couldn't load provider list".to_string())
+                        }
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't load provider list: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::ProvidersListLoaded {
+                        result,
+                    }
+                });
+        }
+        Effect::StoreProviderKey { provider_id, api_key } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    // Raw JSON with the key is constructed only here, at
+                    // execution time, and dropped with the request.
+                    let params = serde_json::json!(
+                        { "providerId" : & provider_id, "apiKey" : api_key.expose(), }
+                    );
+                    let req = acp::ExtRequest::new(
+                        "x.ai/providers/store_key",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize providers/store_key params")
+                            .into(),
+                    );
+                    drop(params);
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => parse_provider_key_status(resp.0.get())
+                            .ok_or_else(|| "couldn't store provider key".to_string()),
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't store provider key: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::ProviderKeyStored {
+                        provider_id,
+                        result,
+                    }
+                });
+        }
+        Effect::ClearProviderKey { provider_id } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({ "providerId" : & provider_id });
+                    let req = acp::ExtRequest::new(
+                        "x.ai/providers/clear_key",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize providers/clear_key params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => parse_provider_key_status(resp.0.get())
+                            .ok_or_else(|| "couldn't clear provider key".to_string()),
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't clear provider key: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::ProviderKeyCleared {
+                        provider_id,
+                        result,
+                    }
+                });
+        }
+        Effect::RefreshProviders => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!({});
+                    let req = acp::ExtRequest::new(
+                        "x.ai/providers/refresh",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize providers/refresh params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let started = wrapper
+                                .get("result")
+                                .unwrap_or(&wrapper)
+                                .get("started")
+                                .and_then(|s| s.as_bool())
+                                .unwrap_or(false);
+                            Ok(started)
+                        }
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't refresh providers: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::ProvidersRefreshRequested {
+                        result,
+                    }
+                });
+        }
         Effect::McpAuthTrigger { agent_id, session_id, server_name } => {
             let tx = acp_tx.clone();
             tasks
