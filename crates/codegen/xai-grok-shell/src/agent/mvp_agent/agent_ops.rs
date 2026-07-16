@@ -1545,10 +1545,7 @@ impl MvpAgent {
         };
         instance
             .auth_manager
-            .configure_refresher(
-                instance.cfg.borrow().grok_com_config.auth_provider_command.clone(),
-                None,
-            );
+            .configure_refresher(instance.cfg.borrow().grok_com_config.auth_provider_command.clone());
         instance
     }
     /// Handle `x.ai/internal/evict_sessions` — the leader server tells us a

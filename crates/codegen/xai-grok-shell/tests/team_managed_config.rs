@@ -594,10 +594,9 @@ async fn expired_refreshable_team_token_heals_after_auth_refresh() {
         &home,
         xai_grok_shell::auth::GrokComConfig::default(),
     ));
-    auth_manager.configure_refresher(
-        Some(r#"echo '{"access_token":"refreshed-team-token","expires_in":3600}'"#.to_string()),
-        None,
-    );
+    auth_manager.configure_refresher(Some(
+        r#"echo '{"access_token":"refreshed-team-token","expires_in":3600}'"#.to_string(),
+    ));
 
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 
@@ -642,7 +641,7 @@ async fn expired_team_token_without_successful_refresh_stays_failed_closed() {
         &home,
         xai_grok_shell::auth::GrokComConfig::default(),
     ));
-    auth_manager.configure_refresher(Some("false".to_string()), None);
+    auth_manager.configure_refresher(Some("false".to_string()));
 
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 

@@ -10,7 +10,7 @@
 //! empty during the 5-minute pre-refresh buffer window in `AuthManager`, both
 //! of which manifest as `POST /v1/storage` 401s at the proxy.
 //!
-//! [`TraceExportConfigWithAuth`] wraps a bare `TraceExportConfig` plus an
+//! [`StorageExportConfigWithAuth`] wraps a bare `TraceExportConfig` plus an
 //! optional `Arc<AuthManager>` and implements `StorageConfig` such that, when
 //! the manager is present, the constructed `StorageClient` gets:
 //!
@@ -42,11 +42,11 @@ use xai_grok_auth::AuthCredentialProvider;
 /// and a few sites without an `AuthManager` in scope) and degrades to
 /// the pre-existing snapshot-based behavior.
 #[derive(Clone)]
-pub(crate) struct TraceExportConfigWithAuth {
+pub(crate) struct StorageExportConfigWithAuth {
     inner: TraceExportConfig,
     auth_manager: Option<Arc<AuthManager>>,
 }
-impl TraceExportConfigWithAuth {
+impl StorageExportConfigWithAuth {
     pub(crate) fn new(inner: TraceExportConfig, auth_manager: Option<Arc<AuthManager>>) -> Self {
         Self {
             inner,
@@ -54,7 +54,7 @@ impl TraceExportConfigWithAuth {
         }
     }
 }
-impl StorageConfig for TraceExportConfigWithAuth {
+impl StorageConfig for StorageExportConfigWithAuth {
     fn bucket_url(&self) -> &str {
         self.inner.bucket_url()
     }
@@ -104,10 +104,10 @@ impl StorageConfig for TraceExportConfigWithAuth {
 /// At sites without an `AuthManager` in scope, pass `None` (degrades to
 /// snapshot behavior; same as calling the helper with the bare config).
 pub(crate) trait WithAuth {
-    fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> TraceExportConfigWithAuth;
+    fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> StorageExportConfigWithAuth;
 }
 impl WithAuth for TraceExportConfig {
-    fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> TraceExportConfigWithAuth {
-        TraceExportConfigWithAuth::new(self.clone(), auth_manager)
+    fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> StorageExportConfigWithAuth {
+        StorageExportConfigWithAuth::new(self.clone(), auth_manager)
     }
 }

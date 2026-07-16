@@ -319,9 +319,9 @@ pub(crate) fn record_auth_401(
     let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer);
 
     // Sink 1 -- local file (~/.grok/logs/unified.jsonl) + scrubbed
-    // tracing event. The local file is reliable but only ships to GCS
-    // on OIDC refresh failure (auth/refresh.rs::spawn_diagnostic_upload),
-    // so by itself it does not give visibility into the steady-state
+    // tracing event. The local file is reliable but stays on disk (the
+    // diagnostic GCS upload on OIDC refresh failure was removed), so by
+    // itself it does not give visibility into the steady-state
     // 401 population. Sink 2 below provides that.
     xai_grok_telemetry::unified_log::warn(
         "auth 401 attribution",

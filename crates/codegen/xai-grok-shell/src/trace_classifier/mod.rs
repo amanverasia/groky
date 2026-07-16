@@ -1084,7 +1084,7 @@ async fn non_interactive_auth_key(grok_home: &Path) -> Result<Option<String>> {
     let config = GrokComConfig::default();
     let auth_provider_command = config.auth_provider_command.clone();
     let manager = std::sync::Arc::new(AuthManager::new(grok_home, config));
-    manager.configure_refresher(auth_provider_command, None);
+    manager.configure_refresher(auth_provider_command);
     match manager.auth().await {
         Ok(auth) => {
             let trimmed = auth.key.trim();

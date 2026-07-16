@@ -680,7 +680,7 @@ pub async fn try_ensure_fresh_auth(grok_com_config: &GrokComConfig) -> Option<Gr
 
     // auth() handles cached-valid (fast path), OIDC refresh, external
     // binary -- all through refresh_chain (single mutation point).
-    auth_manager.configure_refresher(grok_com_config.auth_provider_command.clone(), None);
+    auth_manager.configure_refresher(grok_com_config.auth_provider_command.clone());
     match auth_manager.auth().await {
         Ok(auth) => Some(auth),
         Err(e) => {
@@ -1941,7 +1941,7 @@ mod tests {
 
         // Same engine as `try_ensure_fresh_auth`.
         let auth_manager = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
-        auth_manager.configure_refresher(cfg.auth_provider_command.clone(), None);
+        auth_manager.configure_refresher(cfg.auth_provider_command.clone());
 
         assert!(
             auth_manager.auth().await.is_err(),
