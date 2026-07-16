@@ -120,6 +120,11 @@ pub fn provider_model_entries(
 ) -> IndexMap<String, ModelEntry> {
     let mut entries = IndexMap::new();
     for provider in &catalog.providers {
+        if provider.id.as_str() == "xai" {
+            // xAI models come from the dedicated entitlement pipeline; the
+            // catalog's `xai` row must never enter the generic pipeline.
+            continue;
+        }
         let mut provider = provider.clone();
         let overrides = cfg.config_providers.get(provider.id.as_str());
         if let Some(overrides) = overrides {

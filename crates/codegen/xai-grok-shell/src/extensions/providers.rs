@@ -140,6 +140,7 @@ pub fn store_provider_key(
     req: StoreProviderKeyRequest,
 ) -> Result<ProviderKeyResponse, acp::Error> {
     let adapter = require_adapter(surface)?;
+    reject_managed_provider(&req.provider_id)?;
     if req.api_key.trim().is_empty() {
         return Err(acp::Error::invalid_params().data("apiKey must not be blank"));
     }
@@ -168,6 +169,10 @@ pub fn clear_provider_key(
     req: ClearProviderKeyRequest,
 ) -> Result<ProviderKeyResponse, acp::Error> {
     let adapter = require_adapter(surface)?;
+    reject_managed_provider(&req.provider_id)?;
+    // Validate the provider id (unknown/blank → invalid_params) BEFORE any
+    // clearing or broadcasting side effects.
+    effective_status(surface, &adapter, &req.provider_id)?;
     crate::auth::clear_provider_api_key(&surface.grok_home, &req.provider_id).map_err(|e| {
         tracing::warn!(provider = %req.provider_id, error = %e, "provider key clear failed");
         acp::Error::internal_error().data("failed to clear provider key")
@@ -200,6 +205,14 @@ fn require_adapter(surface: &ProviderSurface) -> Result<Arc<ProviderCatalogAdapt
         .models_manager
         .provider_catalog()
         .ok_or_else(|| acp::Error::internal_error().data("provider catalog not attached"))
+}
+
+/// Rejects key management for providers owned by dedicated auth flows.
+fn reject_managed_provider(provider_id: &str) -> Result<(), acp::Error> {
+    if provider_id == "xai" {
+        return Err(acp::Error::invalid_params().data("xai is managed by the built-in login flow"));
+    }
+    Ok(())
 }
 
 /// Snapshot rows: a pinned synthetic `xai` row (driven by xAI auth state,
@@ -283,10 +296,20 @@ fn broadcast_providers_update(surface: &ProviderSurface, adapter: &ProviderCatal
 /// `x.ai/models/update`) and pushes a replacement provider snapshot. The
 /// caller must have won `try_begin_refresh`.
 fn spawn_catalog_refresh(surface: &ProviderSurface, adapter: Arc<ProviderCatalogAdapter>) {
+    /// Releases the refresh slot on drop, so a panic inside `refresh()`
+    /// cannot wedge the in-flight flag.
+    struct RefreshSlotGuard(Arc<ProviderCatalogAdapter>);
+    impl Drop for RefreshSlotGuard {
+        fn drop(&mut self) {
+            self.0.finish_refresh();
+        }
+    }
     let surface = surface.clone();
     tokio::spawn(async move {
-        let outcome = adapter.refresh().await;
-        adapter.finish_refresh();
+        let outcome = {
+            let _guard = RefreshSlotGuard(Arc::clone(&adapter));
+            adapter.refresh().await
+        };
         match outcome {
             Ok(RefreshOutcome::Updated) => {
                 broadcast_providers_update(&surface, &adapter);

@@ -64,6 +64,7 @@ fn sample_catalog() -> NormalizedCatalog {
                 vec![model("gpt-5", "GPT-5")],
             ),
             provider("emptyco", "EmptyCo", "EMPTYCO_API_KEY", vec![]),
+            provider("xai", "xAI", "XAI_API_KEY", vec![model("grok-4", "Grok 4")]),
         ],
     }
 }
@@ -105,7 +106,94 @@ fn clear_provider_env() {
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("EMPTYCO_API_KEY");
+        std::env::remove_var("XAI_API_KEY");
     }
+}
+
+/// The `xai` provider is managed by the built-in login flow: the generic key
+/// management surface must reject it with `invalid_params`, even though the
+/// upstream catalog carries an `xai` row.
+#[tokio::test]
+#[serial(provider_env)]
+async fn xai_provider_key_management_is_rejected() {
+    clear_provider_env();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    write_cache(tmp.path(), PROVIDER_CATALOG_SOURCE_URL, chrono::Utc::now());
+    let adapter = Arc::new(ProviderCatalogAdapter::from_grok_home(
+        tmp.path().to_path_buf(),
+    ));
+    let surface = surface(tmp.path(), adapter, true);
+
+    let err = store_provider_key(
+        &surface,
+        StoreProviderKeyRequest {
+            provider_id: "xai".into(),
+            api_key: "sk-x".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, agent_client_protocol::ErrorCode::InvalidParams);
+    assert!(
+        xai_grok_shell::auth::read_provider_api_key(tmp.path(), "xai").is_none(),
+        "rejected store must not write an xai key scope"
+    );
+
+    let err = clear_provider_key(
+        &surface,
+        ClearProviderKeyRequest {
+            provider_id: "xai".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, agent_client_protocol::ErrorCode::InvalidParams);
+}
+
+/// `clear_key` must validate the provider id BEFORE clearing anything or
+/// broadcasting: unknown and blank ids map to `invalid_params` with no
+/// side effects.
+#[tokio::test]
+#[serial(provider_env)]
+async fn clear_key_validates_provider_before_side_effects() {
+    clear_provider_env();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    write_cache(tmp.path(), PROVIDER_CATALOG_SOURCE_URL, chrono::Utc::now());
+    let adapter = Arc::new(ProviderCatalogAdapter::from_grok_home(
+        tmp.path().to_path_buf(),
+    ));
+    let surface = surface(tmp.path(), adapter, true);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    surface
+        .models_manager
+        .set_gateway(AcpAgentGatewaySender::new(tx));
+
+    let err = clear_provider_key(
+        &surface,
+        ClearProviderKeyRequest {
+            provider_id: "nonesuch".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, agent_client_protocol::ErrorCode::InvalidParams);
+
+    let err = clear_provider_key(
+        &surface,
+        ClearProviderKeyRequest {
+            provider_id: "  ".into(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.code,
+        agent_client_protocol::ErrorCode::InvalidParams,
+        "blank providerId must be invalid_params, not internal_error"
+    );
+
+    assert!(
+        rx.try_recv().is_err(),
+        "rejected clear_key must not broadcast any update"
+    );
 }
 
 #[tokio::test]

@@ -126,6 +126,31 @@ fn provider_env_key_override_reaches_credential_fallback() {
     unsafe { std::env::remove_var("MY_OPENAI_KEY") };
 }
 
+/// The catalog's `xai` provider must never leak into the generic pipeline:
+/// xAI models come from the dedicated entitlement pipeline, even when an
+/// XAI_API_KEY-style environment credential is configured.
+#[test]
+#[serial(provider_env)]
+fn xai_catalog_provider_is_excluded_from_generic_composition() {
+    unsafe { std::env::set_var("XAI_API_KEY", "xai-env-secret") };
+    let mut catalog = sample_catalog();
+    catalog.providers.push(provider(
+        "xai",
+        "xAI",
+        "XAI_API_KEY",
+        vec![model("grok-4", "Grok 4")],
+    ));
+    let models = provider_model_entries(&catalog, &Config::default(), |_| {
+        Some(CredentialOrigin::Environment)
+    });
+    unsafe { std::env::remove_var("XAI_API_KEY") };
+    assert!(models.contains_key("openai/gpt-5"));
+    assert!(
+        !models.keys().any(|k| k.starts_with("xai/")),
+        "xai/... entries must not be produced by the generic pipeline"
+    );
+}
+
 #[test]
 #[serial(provider_env)]
 fn provider_refresh_preserves_a_still_valid_current_selection() {
