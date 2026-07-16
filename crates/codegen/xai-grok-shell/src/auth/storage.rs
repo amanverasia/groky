@@ -2,7 +2,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use super::model::{API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, lookup_auth};
+use super::model::{
+    API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, lookup_auth, provider_api_key_scope,
+};
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
 /// The lock is released when the inner `File` is dropped (closing the FD).
@@ -366,6 +368,69 @@ pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
     if let Ok(mut map) = read_auth_json(&path) {
         map.remove(API_KEY_SCOPE);
+        if map.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            write_auth_json(&path, &map)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read a provider API key from its `provider::<id>` scope in auth.json.
+///
+/// Returns `None` for invalid provider IDs, a missing/corrupt auth.json,
+/// or an absent scope.
+pub fn read_provider_api_key(grok_home: &Path, provider_id: &str) -> Option<String> {
+    let scope = provider_api_key_scope(provider_id).ok()?;
+    let path = grok_home.join("auth.json");
+    let map = read_auth_json(&path).ok()?;
+    map.get(&scope).map(|a| a.key.clone())
+}
+
+/// Store a provider API key under its `provider::<id>` scope in auth.json,
+/// preserving every sibling scope (xAI API key, OAuth tokens).
+///
+/// Rejects invalid provider IDs and blank keys with `InvalidInput`. Goes
+/// through the same corrupt-recovering reader and atomic owner-only writer
+/// as the xAI key path; the key itself is never logged.
+pub fn store_provider_api_key(
+    grok_home: &Path,
+    provider_id: &str,
+    api_key: &str,
+) -> std::io::Result<()> {
+    let scope = provider_api_key_scope(provider_id)
+        .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
+    if api_key.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "provider API key must not be blank",
+        ));
+    }
+    let path = grok_home.join("auth.json");
+    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    map.insert(
+        scope,
+        GrokAuth {
+            key: api_key.to_owned(),
+            auth_mode: AuthMode::ApiKey,
+            ..Default::default()
+        },
+    );
+    write_auth_json(&path, &map)
+}
+
+/// Remove a provider's `provider::<id>` scope from auth.json.
+///
+/// A missing file or absent scope is a no-op; sibling scopes are preserved
+/// and the file is deleted when the last scope is removed.
+pub fn clear_provider_api_key(grok_home: &Path, provider_id: &str) -> std::io::Result<()> {
+    let scope = provider_api_key_scope(provider_id)
+        .map_err(|reason| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason))?;
+    let path = grok_home.join("auth.json");
+    if let Ok(mut map) = read_auth_json(&path)
+        && map.remove(&scope).is_some()
+    {
         if map.is_empty() {
             let _ = std::fs::remove_file(&path);
         } else {
