@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "xai-grok-telemetry"
 version = "0.1.0"
 edition.workspace = true
-description = "Local diagnostics facade: no-op product-event types, local logs, instrumentation, and Sentry error reporting for Grok Build sessions"
+description = "Local diagnostics facade: no-op product-event types, local logs, and instrumentation for Grok Build sessions"
 authors = ["xAI"]
 
 [features]
@@ -35,16 +35,6 @@ xai-grok-config = { workspace = true }
 xai-grok-sampler = { workspace = true }
 xai-token-estimation = { workspace = true }
 dirs = { workspace = true }
-sentry = { version = "0.42.0", default-features = false, features = [
-    "panic",
-    "anyhow",
-    "tracing",
-    "backtrace",
-    "contexts",
-    "reqwest",
-    "rustls",
-    "debug-images",
-] }
 # Single cross-edge: `events::ToolCallCompleted.outcome` reuses
 # `xai_file_utils::events::types::ToolOutcome` so the local event log and
 # the product telemetry event share the same enum surface. Semantically this enum

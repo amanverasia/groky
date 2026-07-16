@@ -2634,7 +2634,7 @@ pub fn resolve_mcp_recursive_config_watch(
         .resolve()
 }
 /// Sync analogue of [`BoolFlag`] for callers that run before the tokio
-/// runtime (e.g. `init_sentry`). Loads from disk + env directly rather than
+/// runtime. Loads from disk + env directly rather than
 /// from a pre-built `Config`.
 ///
 /// Same convention as [`BoolFlag`]: `resolve()` returns the *enabled* value.
@@ -2719,7 +2719,7 @@ impl SyncBoolFlag {
     }
 }
 /// Sync slice of [`Config::resolve_telemetry_mode`] for use before the tokio
-/// runtime (e.g. `init_sentry`). `true` only when explicitly off.
+/// runtime. `true` only when explicitly off.
 pub fn is_telemetry_disabled_sync() -> bool {
     !SyncBoolFlag::new(telemetry_enabled_from_toml)
         .disable_env("DISABLE_TELEMETRY")
@@ -2735,31 +2735,14 @@ pub fn is_telemetry_explicitly_disabled_sync() -> bool {
         .default(true)
         .resolve()
 }
-/// Sync sibling of [`is_telemetry_disabled_sync`] scoped to Sentry. Inherits
-/// from telemetry when no Sentry-specific signal is set.
-pub fn is_error_reporting_disabled_sync() -> bool {
-    !SyncBoolFlag::new(error_reporting_enabled_from_toml)
-        .disable_env("DISABLE_ERROR_REPORTING")
-        .enable_env(|| env_bool("GROK_ERROR_REPORTING"))
-        .inherit(|| !is_telemetry_disabled_sync())
-        .resolve()
-}
-/// `[features] telemetry` as enabled bool. SessionMetrics counts as enabled
-/// — see ERROR_REPORTING_PLAN.md. `None` for absent or unparseable.
+/// `[features] telemetry` as enabled bool. SessionMetrics counts as enabled.
+/// `None` for absent or unparseable.
 fn telemetry_enabled_from_toml(root: &toml::Value) -> Option<bool> {
     match root.get("features")?.as_table()?.get("telemetry")? {
         toml::Value::Boolean(b) => Some(*b),
         toml::Value::String(s) => TelemetryMode::parse(s).map(|m| !m.is_disabled()),
         _ => None,
     }
-}
-/// `[diagnostics] error_reporting` as enabled bool. Bool-only; no
-/// `session_metrics` equivalent. `None` falls through to inheritance.
-fn error_reporting_enabled_from_toml(root: &toml::Value) -> Option<bool> {
-    root.get("diagnostics")?
-        .as_table()?
-        .get("error_reporting")?
-        .as_bool()
 }
 /// `GROK_TELEMETRY_ENABLED` resolved through `TelemetryMode::parse` so the
 /// extended string forms (e.g. `"session_metrics"`) are accepted.

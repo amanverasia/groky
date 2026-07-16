@@ -1,8 +1,8 @@
 //! Local-only telemetry facade for Grok Build sessions: event types are kept
 //! for API compatibility, and the retained pieces are local-only diagnostics
-//! (unified/debug/memory/hooks/sampling logs, instrumentation, prompt timing)
-//! plus Sentry error reporting, whose removal is still pending. No OTLP or
-//! analytics export remains.
+//! (unified/debug/memory/hooks/sampling logs, instrumentation, prompt timing).
+//! No OTLP, analytics, or error-report export remains; nothing in this crate
+//! emits off-machine.
 //!
 //! Extracted from `xai-file-utils` per review feedback so telemetry has
 //! its own ownership boundary (see CODEOWNERS) and so downstream consumers
@@ -24,7 +24,6 @@ pub mod memory_log;
 pub mod memory_telemetry;
 pub mod prompt_timing;
 pub mod sampling_log;
-pub mod sentry;
 pub mod session_ctx;
 pub mod session_metrics;
 pub mod unified_log;

@@ -11,9 +11,9 @@
 //!    `~/.grok/logs/unified.jsonl` file (best-effort; ships to GCS
 //!    only on OIDC refresh failure via `auth/refresh.rs`).
 //! 2. A discrete `tracing::warn_span!("auth_401_attribution", ...)`
-//!    captured by the OTel layer in `util/otel_layer.rs` and shipped
-//!    via OTLP export to the configured telemetry backend
-//!    (queryable by span name `auth_401_attribution`).
+//!    observable by any locally installed `tracing` subscriber
+//!    (queryable by span name `auth_401_attribution`). No OTLP or
+//!    other off-machine span export remains.
 //!
 //! # Schema (every emit)
 //!
@@ -291,7 +291,7 @@ pub(crate) fn record_consumer_401(
 }
 
 /// Emit a single `auth 401 attribution` event to both sinks (local
-/// unified log file + OTel span for OTLP export).
+/// unified log file + local `tracing` span).
 ///
 /// Schema:
 /// `(sent_key_prefix, current_key_prefix, mint_age_seconds,
@@ -329,18 +329,17 @@ pub(crate) fn record_auth_401(
         Some(payload.clone()),
     );
 
-    // Sink 2 -- discrete OTel span exported via OTLP
-    // (util/otel_layer.rs). Auth 401 attribution schema fields below
-    // become OTel span attributes under `attributes.custom.<name>`
-    // per the tracing-opentelemetry bridge; query by span name
-    // `auth_401_attribution` in the configured telemetry backend.
+    // Sink 2 -- discrete tracing span observable by locally installed
+    // subscribers. Auth 401 attribution schema fields below
+    // become span attributes; query by span name
+    // `auth_401_attribution` in local diagnostics.
     //
     // Wrapping in a `warn_span!` (vs. plain `tracing::warn!`) ensures
-    // emission even when no parent span is active. The OTel layer
-    // attaches plain events to the currently-entered span only, so a
+    // emission even when no parent span is active. Span-capturing
+    // layers may attach plain events to the currently-entered span only, so a
     // `tracing::warn!` from a `spawn_blocking` closure (idle-resume
-    // model refresh) or a background sync task is silently dropped.
-    // A `warn_span!` itself is always emitted by the layer's
+    // model refresh) or a background sync task could be silently dropped.
+    // A `warn_span!` itself is always emitted by a layer's
     // `on_new_span`/`on_close` hooks regardless of parent context.
     //
     // The span carries no body and is dropped immediately at the end
@@ -774,8 +773,8 @@ mod tests {
 
     /// `record_auth_401` emits a discrete `warn_span!` with name
     /// `"auth_401_attribution"` and the attribution fields as span
-    /// attributes. This is the span the tracing-opentelemetry bridge
-    /// ships via OTLP export to the configured telemetry backend.
+    /// attributes, observable by any locally installed `tracing`
+    /// subscriber (no off-machine export).
     /// Verifies field names, types, and values match the schema
     /// documented at the top of this module.
     #[test]

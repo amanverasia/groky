@@ -11,7 +11,7 @@
 //! in normal Rust context (not actual signal-handler context), so it can use
 //! the full [`super::emit_terminal_teardown_sequences`] path
 //! (`with_locked_stderr`, conditional cursor-style reset, multiplexer flush) plus
-//! `disable_raw_mode`, then flush Sentry/OpenTelemetry, then exit.
+//! `disable_raw_mode`, then flush local diagnostics, then exit.
 //!
 //! SIGPIPE is intentionally left alone. The current disposition is `SIG_IGN`
 //! (Rust's stdlib default), which means writes to a closed pipe return
@@ -166,11 +166,11 @@ fn request_graceful_or_exit(code: i32) {
     }
 }
 
-/// Restore the terminal first, then flush observability, then exit.
+/// Restore the terminal first, then flush local diagnostics, then exit.
 ///
-/// Restore must precede the (up to 2-second) Sentry flush; otherwise the
-/// user stares at a raw-mode + alt-screen + mouse-SGR terminal for that
-/// whole window. Best-effort: a frame queued on the writer thread microseconds
+/// Restore comes first so the user never stares at a raw-mode + alt-screen +
+/// mouse-SGR terminal while the flush runs.
+/// Best-effort: a frame queued on the writer thread microseconds
 /// before the signal can still land after our teardown writes -- the writer
 /// thread is not reachable from here without a deadlock risk.
 fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
@@ -205,9 +205,8 @@ fn flush_telemetry_and_exit(exit_code: i32) -> ! {
     // runs on the force/second-signal and agent-mode paths that skip the
     // graceful quit; the graceful path reaps them in `app::run`'s teardown.
     xai_tty_utils::global_process_scope().kill_all();
-    // Restore fd 2 so Sentry flushes reach the terminal.
+    // Restore fd 2 so final diagnostics reach the terminal.
     xai_tty_utils::restore_native_stderr();
-    xai_grok_telemetry::sentry::flush_on_shutdown();
     // Flush the --debug firehose on TUI signal exit (this path bypasses main's flush).
     xai_grok_telemetry::debug_log::flush();
     std::process::exit(exit_code);
@@ -230,6 +229,17 @@ mod tests {
         fn drop(&mut self) {
             TERMINAL_OWNED.store(self.0, Ordering::Release);
         }
+    }
+
+    /// The signal-exit path must restore the terminal/stderr locally and must
+    /// not call into any remote error-reporting (Sentry) module. `format!`
+    /// assembles the forbidden token so this test can't match itself.
+    #[test]
+    fn shutdown_restores_terminal_without_remote_error_reporting() {
+        let source = include_str!("signal_handler.rs");
+        let forbidden = format!("sen{}::", "try");
+        assert!(!source.contains(&forbidden), "sentry call survived");
+        assert!(source.contains("restore_native_stderr"));
     }
 
     #[tokio::test]

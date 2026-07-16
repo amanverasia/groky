@@ -558,19 +558,6 @@ trace_upload = false                                      # disable session/trac
 
 Set these only to point telemetry at your own infrastructure or to turn parts of it off. The built-in endpoint and credentials are managed by Grok; leave them unset to use the defaults.
 
-The same `[telemetry]` table also configures the **external OpenTelemetry stream** — an independent opt-in (it does not require the telemetry toggle above) that ships a curated, content-free usage schema to your *own* OTLP collector. Collector auth is supplied via `OTEL_EXPORTER_OTLP_HEADERS` and is never stored on disk. See [Monitoring & Usage](24-monitoring-usage.md) for the full schema, env vars, and privacy model.
-
-```toml
-[telemetry]
-otel_enabled = true                                       # external OTEL master switch (= GROK_EXTERNAL_OTEL)
-otel_metrics_exporter = "otlp"                            # otlp | console | none
-otel_logs_exporter = "otlp"                               # otlp | console | none
-otel_endpoint = "https://collector.corp.example:4318"     # OTLP base endpoint
-otel_protocol = "http/protobuf"                           # http/protobuf | grpc
-otel_log_user_prompts = false                             # content gate (admins can pin via requirements)
-otel_log_tool_details = false                             # content gate (admins can pin via requirements)
-```
-
 ### Enterprise Deployment
 
 A complete config for enterprise use:
