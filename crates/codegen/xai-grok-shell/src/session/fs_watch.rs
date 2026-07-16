@@ -578,7 +578,7 @@ impl FsWatchPlan {
         // Built only when the client opted into git-head notifications. The
         // restore-code consumer (the pager) advertises it, so it persists HEAD
         // here on every refresh; the end-of-turn `PersistGitHead` is a
-        // best-effort fallback (trace-gated), not the load-bearing path.
+        // best-effort fallback, not the load-bearing path.
         let git_head = caps.git_head.then(|| GitHead {
             gateway: deps.gateway,
             session_id: deps.session_id,

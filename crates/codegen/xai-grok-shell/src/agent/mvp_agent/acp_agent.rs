@@ -2321,6 +2321,176 @@ impl acp::Agent for MvpAgent {
                         None
                     }
                 };
+                // Session registry lifecycle: register the session on its first
+                // turn, then advance the turn markers below at the end of every
+                // turn. This is product persistence (session list, restore,
+                // title sync), independent of any telemetry.
+                if turn_number == 0
+                    && let Some(client) = self.session_registry_client()
+                {
+                    let cwd_str = handle.info.cwd.clone();
+                    let model = model.clone();
+                    let hostname = gethostname::gethostname()
+                        .to_string_lossy()
+                        .to_string();
+                    let suppress = self
+                        .auth_manager
+                        .current_or_expired()
+                        .is_some_and(|a| a.is_zdr_team());
+                    let device_id = if suppress { None } else { Some(agent_id()) };
+                    let first_prompt = if suppress {
+                        None
+                    } else {
+                        arguments.prompt.iter().find_map(|b| {
+                            if let acp::ContentBlock::Text(t) = b {
+                                Some(t.text.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    let sid = arguments.session_id.to_string();
+                    tokio::spawn(async move {
+                        let git_out = |args: &[&str]| -> Option<String> {
+                            xai_tty_utils::git_command()
+                                .current_dir(&cwd_str)
+                                .args(args)
+                                .output()
+                                .ok()
+                                .filter(|o| o.status.success())
+                                .map(|o| {
+                                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                                })
+                                .filter(|s| !s.is_empty())
+                        };
+                        let repo_remote_url = git_out(&["remote", "get-url", "origin"]);
+                        let repo_branch = git_out(&["rev-parse", "--abbrev-ref", "HEAD"]);
+                        let repo_head_at_start = git_out(&["rev-parse", "HEAD"]);
+                        let reg_req = crate::agent::session_registry_client::RegisterRequest {
+                            session_id: sid.clone(),
+                            cwd: cwd_str,
+                            gcs_trace_prefix: sid,
+                            model_id: Some(model),
+                            repo_remote_url,
+                            repo_branch,
+                            repo_head_at_start,
+                            hostname: Some(hostname),
+                            device_id,
+                            parent_session_id: None,
+                            session_kind: None,
+                            subagent_type: None,
+                            subagent_persona: None,
+                            subagent_role: None,
+                            fork_context_source: None,
+                            subagent_depth: None,
+                        };
+                        if let Err(e) = client.register(&reg_req).await {
+                            tracing::warn!(
+                                error = % e, "session registry register failed (non-fatal)"
+                            );
+                        }
+                        let info = crate::session::info::Info {
+                            id: agent_client_protocol::SessionId::new(
+                                reg_req.session_id.clone(),
+                            ),
+                            cwd: reg_req.cwd.clone(),
+                        };
+                        let summary_path = crate::session::persistence::session_dir(&info)
+                            .join("summary.json");
+                        let summary = if suppress {
+                            None
+                        } else {
+                            std::fs::read(&summary_path)
+                                .ok()
+                                .and_then(|bytes| {
+                                    serde_json::from_slice::<
+                                        crate::session::persistence::Summary,
+                                    >(&bytes)
+                                        .ok()
+                                })
+                                .map(|s| s.session_summary)
+                                .filter(|s| !s.is_empty())
+                        };
+                        if first_prompt.is_some() || summary.is_some() {
+                            let upd_req = crate::agent::session_registry_client::UpdateRequest {
+                                summary,
+                                first_prompt,
+                                last_turn_number: None,
+                                repo_head_at_end: None,
+                                restorable_turn_number: None,
+                            };
+                            tracing::debug!(
+                                session_id = % reg_req.session_id, has_summary = upd_req
+                                .summary.is_some(), "session registry post-register update"
+                            );
+                            if let Err(e) = client
+                                .update(&reg_req.session_id, &upd_req)
+                                .await
+                            {
+                                tracing::warn!(
+                                    error = % e,
+                                    "session registry first-prompt update failed (non-fatal)"
+                                );
+                            }
+                        }
+                    });
+                }
+                // Advance `last_turn_number` and `restorable_turn_number` at end
+                // of turn. Session state is persisted locally by the run loop, so
+                // the completed turn is restorable without any upload
+                // confirmation step.
+                let registry_turn = i32::try_from(turn_number).unwrap_or(i32::MAX);
+                let cwd_for_git = handle.info.cwd.clone();
+                if let Some(client) = self.session_registry_client() {
+                    let sid = arguments.session_id.to_string();
+                    let cwd = cwd_for_git.clone();
+                    tokio::spawn(async move {
+                        let repo_head_at_end = xai_tty_utils::git_command()
+                            .current_dir(&cwd)
+                            .args(["rev-parse", "HEAD"])
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| {
+                                String::from_utf8_lossy(&o.stdout).trim().to_string()
+                            })
+                            .filter(|s| !s.is_empty());
+                        let req = crate::agent::session_registry_client::UpdateRequest {
+                            summary: None,
+                            first_prompt: None,
+                            last_turn_number: Some(registry_turn),
+                            repo_head_at_end,
+                            restorable_turn_number: Some(registry_turn),
+                        };
+                        if let Err(e) = client.update(&sid, &req).await {
+                            tracing::warn!(
+                                error = % e,
+                                "session registry turn-number update failed (non-fatal)"
+                            );
+                        }
+                    });
+                }
+                // Persist git HEAD at end of turn so restore can diff against
+                // the workspace state the turn finished on.
+                {
+                    let cwd = cwd_for_git;
+                    let cmd_tx = handle.cmd_tx.clone();
+                    tokio::spawn(async move {
+                        let head = xai_grok_workspace::session::git::get_current_commit(
+                                std::path::Path::new(&cwd),
+                            )
+                            .await;
+                        let branch = xai_grok_workspace::session::git::get_branch(
+                                std::path::Path::new(&cwd),
+                            )
+                            .await;
+                        let _ = cmd_tx
+                            .send(crate::session::SessionCommand::PersistGitHead {
+                                commit: head,
+                                branch,
+                            });
+                    });
+                }
                 let last_turn_usage = last_turn_usage_for_meta;
                 let cancellation_category = match &completion_kind {
                     crate::session::commands::PromptCompletionKind::Cancelled {
