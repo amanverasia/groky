@@ -48,13 +48,33 @@ enum ExcludedEntry {
     InvalidProviderId { provider_id: String },
 }
 
+/// npm SDK package → wire protocol, grounded in each provider's documented
+/// API. ChatCompletions entries expose an OpenAI-compatible
+/// `/chat/completions` endpoint. SDKs speaking proprietary or cloud-scoped
+/// protocols (Google, Vertex, Bedrock, Azure deployments, Cohere, gateways)
+/// are intentionally absent and normalize to `Unsupported`.
+const NPM_PROTOCOLS: &[(&str, Protocol)] = &[
+    ("@ai-sdk/anthropic", Protocol::Messages),
+    ("@ai-sdk/cerebras", Protocol::ChatCompletions),
+    ("@ai-sdk/deepinfra", Protocol::ChatCompletions),
+    ("@ai-sdk/deepseek", Protocol::ChatCompletions),
+    ("@ai-sdk/fireworks", Protocol::ChatCompletions),
+    ("@ai-sdk/groq", Protocol::ChatCompletions),
+    ("@ai-sdk/mistral", Protocol::ChatCompletions),
+    ("@ai-sdk/openai", Protocol::Responses),
+    ("@ai-sdk/openai-compatible", Protocol::ChatCompletions),
+    ("@ai-sdk/perplexity", Protocol::ChatCompletions),
+    ("@ai-sdk/togetherai", Protocol::ChatCompletions),
+    ("@ai-sdk/xai", Protocol::ChatCompletions),
+    ("@openrouter/ai-sdk-provider", Protocol::ChatCompletions),
+];
+
 fn protocol_from_npm(npm: &str) -> Protocol {
-    match npm {
-        "@ai-sdk/anthropic" => Protocol::Messages,
-        "@ai-sdk/openai" => Protocol::Responses,
-        "@ai-sdk/openai-compatible" => Protocol::ChatCompletions,
-        _ => Protocol::Unsupported,
-    }
+    NPM_PROTOCOLS
+        .iter()
+        .find(|(pkg, _)| *pkg == npm)
+        .map(|(_, protocol)| *protocol)
+        .unwrap_or(Protocol::Unsupported)
 }
 
 fn check_string(
@@ -274,6 +294,49 @@ mod tests {
         let raw = include_bytes!("../tests/fixtures/models-dev-small.json");
         let catalog = normalize_models_dev(raw, NormalizationLimits::default()).unwrap();
         assert!(catalog.provider_str("unsupported").is_none());
+    }
+
+    #[test]
+    fn maps_openai_compatible_sdks_to_chat_completions() {
+        for npm in [
+            "@openrouter/ai-sdk-provider",
+            "@ai-sdk/groq",
+            "@ai-sdk/mistral",
+            "@ai-sdk/deepseek",
+            "@ai-sdk/cerebras",
+            "@ai-sdk/togetherai",
+            "@ai-sdk/fireworks",
+            "@ai-sdk/xai",
+            "@ai-sdk/deepinfra",
+            "@ai-sdk/perplexity",
+        ] {
+            let raw = format!(
+                r#"{{"p":{{"name":"P","api":"https://p.example/v1","env":[],"npm":"{npm}","models":{{"m":{{"name":"M"}}}}}}}}"#
+            );
+            let catalog =
+                normalize_models_dev(raw.as_bytes(), NormalizationLimits::default()).unwrap();
+            let model = catalog.provider_str("p").unwrap().model_str("m").unwrap();
+            assert_eq!(model.protocol, Protocol::ChatCompletions, "npm: {npm}");
+        }
+    }
+
+    #[test]
+    fn keeps_incompatible_sdks_unsupported() {
+        for npm in [
+            "@ai-sdk/google",
+            "@ai-sdk/google-vertex",
+            "@ai-sdk/google-vertex/anthropic",
+            "@ai-sdk/amazon-bedrock",
+            "@ai-sdk/azure",
+            "@ai-sdk/cohere",
+        ] {
+            let raw = format!(
+                r#"{{"p":{{"name":"P","api":"https://p.example/v1","env":[],"npm":"{npm}","models":{{}}}}}}"#
+            );
+            let catalog =
+                normalize_models_dev(raw.as_bytes(), NormalizationLimits::default()).unwrap();
+            assert!(catalog.provider_str("p").is_none(), "npm: {npm}");
+        }
     }
 
     #[test]

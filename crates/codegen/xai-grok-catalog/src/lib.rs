@@ -98,6 +98,20 @@ mod tests {
             Some("https://api.anthropic.com/v1")
         );
         assert_eq!(base("openai").as_deref(), Some("https://api.openai.com/v1"));
+        for id in [
+            "cerebras",
+            "deepinfra",
+            "groq",
+            "mistral",
+            "perplexity",
+            "togetherai",
+            "xai",
+        ] {
+            assert!(
+                base(id).is_some_and(|url| url.starts_with("https://")),
+                "provider {id} must have an override base URL"
+            );
+        }
     }
 
     #[test]
