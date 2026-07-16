@@ -4,10 +4,15 @@
 //! and field-aware layering. This crate must not depend on shell, pager,
 //! sampler, auth, ACP, or sampling-types.
 
+pub mod credentials;
 pub mod layer;
 pub mod normalize;
 pub mod types;
 
+pub use credentials::{
+    CredentialOrigin, CredentialSources, ProviderAvailability, ProviderStatus, ResolvedCredential,
+    SecretString, classify_provider, resolve_credential,
+};
 pub use layer::{CatalogPatch, ModelPatch, ProviderPatch, apply_patch};
 pub use normalize::normalize_models_dev;
 pub use types::{
