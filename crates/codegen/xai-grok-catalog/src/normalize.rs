@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::types::{
-    CatalogError, CatalogModel, CatalogProvider, ModelCost, ModelId, NormalizationLimits,
-    NormalizedCatalog, Protocol, ProviderId, CATALOG_SCHEMA_VERSION,
+    CATALOG_SCHEMA_VERSION, CatalogError, CatalogModel, CatalogProvider, ModelCost, ModelId,
+    NormalizationLimits, NormalizedCatalog, Protocol, ProviderId,
 };
 
 #[derive(Debug, Default, Deserialize)]

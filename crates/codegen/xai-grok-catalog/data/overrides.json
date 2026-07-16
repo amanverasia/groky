@@ -1,0 +1,10 @@
+{
+  "providers": [
+    {
+      "id": "xai",
+      "api_base_url": "https://api.x.ai/v1",
+      "env_vars": ["XAI_API_KEY"],
+      "models": []
+    }
+  ]
+}
