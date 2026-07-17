@@ -719,8 +719,10 @@ pub struct MvpAgent {
     /// Context for managing background copy operations (e.g., copying ignored files)
     pub(crate) background_copy_context: BackgroundCopyContext,
     /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
+    /// Released by `remove_session`.
     pub(crate) session_turn_numbers: RefCell<HashMap<acp::SessionId, u64>>,
     /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
+    /// Released by `remove_session`.
     permission_event_receivers: RefCell<
         HashMap<acp::SessionId, tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>>,
     >,
@@ -755,7 +757,7 @@ pub struct MvpAgent {
     /// transiently degraded when a reconnect replays `session/load` (e.g.
     /// fetch still in flight after a leader restart), so the prompt path
     /// re-checks and self-heals — or (b) the user explicitly switches
-    /// models via `set_session_model`.
+    /// models via `set_session_model`. Released by `remove_session`.
     model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.

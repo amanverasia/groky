@@ -3666,7 +3666,6 @@ pub async fn connect_local_workspace(
     status_config: crate::status_config::StatusConfig,
     upload_queue_enabled: bool,
     project_lsp_trusted: bool,
-    ready_file: Option<std::path::PathBuf>,
     diag: Option<DiagHandle>,
     require_explicit_toolset: bool,
     confine_fs_to_workspace_root: bool,
@@ -3696,7 +3695,6 @@ pub async fn connect_local_workspace(
         server_id,
         alpha_test_key,
         allow_insecure_ws,
-        ready_file,
         diag,
     };
     let tool_config = xai_grok_agent::workspace_grok_build_toolset();
@@ -4244,7 +4242,7 @@ impl WorkspaceHandle {
         )
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WorkspaceHandle {
     fn test_config(
         root_cwd: std::path::PathBuf,
@@ -7421,7 +7419,6 @@ pub(crate) mod tests {
             server_id: Some("server-1".to_string()),
             alpha_test_key: None,
             allow_insecure_ws: true,
-            ready_file: None,
             diag: None,
         };
         let config = WorkspaceConfig::new_for_proxy(
