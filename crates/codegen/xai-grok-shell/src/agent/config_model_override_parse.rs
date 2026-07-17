@@ -15,7 +15,7 @@
 use indexmap::IndexMap;
 use serde::Serialize;
 
-use super::config::ConfigModelOverride;
+use super::config::{ConfigModelOverride, ConfigProviderOverride};
 
 /// Category for a [`ModelOverrideWarning`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -130,6 +130,98 @@ pub(crate) fn log_model_override_warnings(warnings: &[ModelOverrideWarning]) {
     }
 }
 
+/// Result of [`parse_provider_overrides`].
+pub(crate) struct ParsedProviderOverrides {
+    pub providers: IndexMap<String, ConfigProviderOverride>,
+    pub warnings: Vec<ModelOverrideWarning>,
+}
+
+/// Parses every `[provider.<id>]` entry in `raw_config` with the same
+/// resilience as `[model.<id>]`: bad fields warn and are skipped, the
+/// provider entry itself is never dropped.
+pub(crate) fn parse_provider_overrides(raw_config: &toml::Value) -> ParsedProviderOverrides {
+    let mut providers = IndexMap::new();
+    let mut warnings = Vec::new();
+    let Some(section) = raw_config.get("provider") else {
+        return ParsedProviderOverrides {
+            providers,
+            warnings,
+        };
+    };
+    let Some(table) = section.as_table() else {
+        warnings.push(ModelOverrideWarning {
+            model_key: None,
+            field: None,
+            kind: ModelOverrideWarningKind::NotATable,
+            reason: format!(
+                "`provider` must be a table of [provider.<id>] entries, got {}; all provider overrides ignored",
+                section.type_str()
+            ),
+        });
+        return ParsedProviderOverrides {
+            providers,
+            warnings,
+        };
+    };
+    for (provider_key, value) in table {
+        let Some(entry_table) = value.as_table() else {
+            warnings.push(ModelOverrideWarning {
+                model_key: Some(provider_key.clone()),
+                field: None,
+                kind: ModelOverrideWarningKind::NotATable,
+                reason: format!(
+                    "expected a table like [provider.\"{provider_key}\"], got {}; entry dropped",
+                    value.type_str()
+                ),
+            });
+            continue;
+        };
+        let (entry, entry_warnings) =
+            parse_override_table::<ConfigProviderOverride>(provider_key, entry_table.clone());
+        warnings.extend(entry_warnings);
+        providers.insert(provider_key.clone(), entry);
+    }
+    ParsedProviderOverrides {
+        providers,
+        warnings,
+    }
+}
+
+/// Parses one override table resiliently: whole-table parse first, then
+/// per-field pruning, then an empty override as the last resort.
+fn parse_override_table<T: serde::de::DeserializeOwned + Default>(
+    entry_key: &str,
+    mut table: toml::map::Map<String, toml::Value>,
+) -> (T, Vec<ModelOverrideWarning>) {
+    let mut warnings = Vec::new();
+    match deserialize_with_unknown_fields::<T>(table.clone()) {
+        Ok((entry, unknown)) => {
+            warnings.extend(unknown_field_warnings(entry_key, unknown));
+            (entry, warnings)
+        }
+        Err(_) => {
+            prune_invalid_fields::<T>(entry_key, &mut table, &mut warnings);
+            match deserialize_with_unknown_fields::<T>(table) {
+                Ok((entry, unknown)) => {
+                    warnings.extend(unknown_field_warnings(entry_key, unknown));
+                    (entry, warnings)
+                }
+                Err(error) => {
+                    warnings.push(ModelOverrideWarning {
+                        model_key: Some(entry_key.to_owned()),
+                        field: None,
+                        kind: ModelOverrideWarningKind::UnparseableEntry,
+                        reason: format!(
+                            "failed to parse after skipping invalid fields ({error}); using empty override"
+                        ),
+                    });
+                    (T::default(), warnings)
+                }
+            }
+        }
+    }
+}
+
 fn parse_model_override_table(
     model_key: &str,
     mut table: toml::map::Map<String, toml::Value>,
@@ -139,35 +231,9 @@ fn parse_model_override_table(
 
     // Unknown-field warnings come from whichever parse produces the returned
     // entry, so both paths report them identically.
-    match deserialize_with_unknown_fields(table.clone()) {
-        Ok((entry, unknown)) => {
-            warnings.extend(unknown_field_warnings(model_key, unknown));
-            (entry, warnings)
-        }
-        Err(_) => {
-            prune_invalid_fields(model_key, &mut table, &mut warnings);
-            match deserialize_with_unknown_fields(table) {
-                Ok((entry, unknown)) => {
-                    warnings.extend(unknown_field_warnings(model_key, unknown));
-                    (entry, warnings)
-                }
-                Err(error) => {
-                    // Reachable only when fields conflict jointly, e.g. an
-                    // alias pair missing from `ALIASES`. Keep the model
-                    // rather than dropping it.
-                    warnings.push(ModelOverrideWarning {
-                        model_key: Some(model_key.to_owned()),
-                        field: None,
-                        kind: ModelOverrideWarningKind::UnparseableEntry,
-                        reason: format!(
-                            "failed to parse after skipping invalid fields ({error}); using empty override"
-                        ),
-                    });
-                    (ConfigModelOverride::default(), warnings)
-                }
-            }
-        }
-    }
+    let (entry, entry_warnings) = parse_override_table::<ConfigModelOverride>(model_key, table);
+    warnings.extend(entry_warnings);
+    (entry, warnings)
 }
 
 /// `(canonical, legacy)` key pairs that serde rejects as duplicate fields
@@ -187,7 +253,7 @@ fn dedupe_aliases(
         if !(table.contains_key(canonical) && table.contains_key(legacy)) {
             continue;
         }
-        match field_parse_error(canonical, &table[canonical]) {
+        match field_parse_error::<ConfigModelOverride>(canonical, &table[canonical]) {
             None => {
                 table.remove(legacy);
                 warnings.push(ModelOverrideWarning {
@@ -212,9 +278,9 @@ fn dedupe_aliases(
 
 /// Deserializes `table`, also returning the unknown field names that serde
 /// would otherwise silently discard.
-fn deserialize_with_unknown_fields(
+fn deserialize_with_unknown_fields<T: serde::de::DeserializeOwned>(
     table: toml::map::Map<String, toml::Value>,
-) -> Result<(ConfigModelOverride, Vec<String>), toml::de::Error> {
+) -> Result<(T, Vec<String>), toml::de::Error> {
     let mut unknown = Vec::new();
     let entry = serde_ignored::deserialize(toml::Value::Table(table), |path| {
         unknown.push(path.to_string());
@@ -236,12 +302,12 @@ fn unknown_field_warnings(model_key: &str, unknown: Vec<String>) -> Vec<ModelOve
 
 /// Removes each field that fails to parse on its own, one warning per field.
 /// Unknown fields stay; the follow-up parse reports them.
-fn prune_invalid_fields(
+fn prune_invalid_fields<T: serde::de::DeserializeOwned>(
     model_key: &str,
     table: &mut toml::map::Map<String, toml::Value>,
     warnings: &mut Vec<ModelOverrideWarning>,
 ) {
-    table.retain(|field, value| match field_parse_error(field, value) {
+    table.retain(|field, value| match field_parse_error::<T>(field, value) {
         None => true,
         Some(error) => {
             warnings.push(ModelOverrideWarning {
@@ -256,12 +322,13 @@ fn prune_invalid_fields(
 }
 
 /// Parses `field` in isolation, returning the error if it fails.
-fn field_parse_error(field: &str, value: &toml::Value) -> Option<toml::de::Error> {
+fn field_parse_error<T: serde::de::DeserializeOwned>(
+    field: &str,
+    value: &toml::Value,
+) -> Option<toml::de::Error> {
     let mut singleton = toml::map::Map::new();
     singleton.insert(field.to_owned(), value.clone());
-    toml::Value::Table(singleton)
-        .try_into::<ConfigModelOverride>()
-        .err()
+    toml::Value::Table(singleton).try_into::<T>().err()
 }
 
 #[cfg(test)]

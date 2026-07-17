@@ -968,6 +968,26 @@ impl SlashController {
         if trimmed.is_empty() {
             return items.iter().map(SuggestionRow::from_arg).collect();
         }
+        // Model rows use the deterministic weighted ranker (direct
+        // provider/model identity beats display-name fuzzy proxies). Prime
+        // this controller's matcher pattern afterwards so highlight indices
+        // still track the query.
+        if items.iter().any(|item| item.model_id.is_some()) {
+            let ranked = commands::model::rank_model_items(&items, trimmed);
+            let _ = self
+                .matcher
+                .rank(ranked.as_slice(), trimmed, ranked.len(), |item| {
+                    item.match_text.as_str()
+                });
+            return ranked
+                .iter()
+                .map(|item| {
+                    let mut row = SuggestionRow::from_arg(item);
+                    row.indices = self.matcher.indices(row.display.as_str());
+                    row
+                })
+                .collect();
+        }
         let hits = self
             .matcher
             .rank(items.as_slice(), trimmed, items.len(), |item| {
@@ -2608,6 +2628,7 @@ mod tests {
                 match_text: match_text.into(),
                 insert_text: insert.into(),
                 description: String::new(),
+                ..Default::default()
             };
             if let Some(rest) = args_query.strip_prefix("first")
                 && rest.starts_with(char::is_whitespace)

@@ -12543,6 +12543,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-catalog"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "xai-grok-compaction"
 version = "0.1.0"
 dependencies = [
@@ -13216,6 +13231,7 @@ dependencies = [
  "xai-grok-agent",
  "xai-grok-announcements",
  "xai-grok-auth",
+ "xai-grok-catalog",
  "xai-grok-compaction",
  "xai-grok-config",
  "xai-grok-config-types",

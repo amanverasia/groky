@@ -1407,3 +1407,10 @@ pub(super) fn unregister_active_session_best_effort_in(
         Err(e) => tracing::warn!(? e, "Failed to unregister active session"),
     }
 }
+/// Parse an `x.ai/providers/{store,clear}_key` response into the returned
+/// provider status. Secret-free by construction (reads `status` only).
+pub(super) fn parse_provider_key_status(raw: &str) -> Option<crate::providers::ProviderStatus> {
+    let wrapper: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let inner = wrapper.get("result").unwrap_or(&wrapper);
+    serde_json::from_value(inner.get("status")?.clone()).ok()
+}

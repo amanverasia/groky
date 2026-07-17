@@ -1065,7 +1065,10 @@ impl AgentView {
                             previous_palette: None,
                             window: crate::views::modal_window::ModalWindowState::new(),
                         });
-                        return InputOutcome::Changed;
+                        // Render immediately from current state; one coalesced
+                        // background refresh keeps the provider catalog fresh
+                        // without delaying (or later closing) the picker.
+                        return InputOutcome::Action(Action::RefreshProviders);
                     }
                 }
                 InputOutcome::Changed

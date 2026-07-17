@@ -358,6 +358,41 @@ impl AgentView {
             }
         }
 
+        // Providers: key entry owns its own Esc; otherwise route chrome first.
+        if let ActiveModal::Providers { state } = modal {
+            use crate::views::providers_modal::{self, ProvidersMode, ProvidersOutcome};
+            let entering = matches!(state.mode, ProvidersMode::EnteringKey { .. });
+            if !entering {
+                let chrome_cfg = mw::ModalWindowConfig {
+                    title: "",
+                    tabs: None,
+                    shortcuts: &[],
+                    sizing: mw::ModalSizing::default(),
+                    fold_info: None,
+                };
+                if matches!(
+                    mw::handle_modal_key(&mut state.window, key, &chrome_cfg),
+                    ModalWindowOutcome::CloseRequested
+                ) {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+            }
+            return match providers_modal::handle_providers_key(state, key) {
+                ProvidersOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                ProvidersOutcome::CloseWithAction(action) => {
+                    self.active_modal = None;
+                    InputOutcome::Action(action)
+                }
+                ProvidersOutcome::Action(action) => InputOutcome::Action(action),
+                ProvidersOutcome::Changed => InputOutcome::Changed,
+                ProvidersOutcome::Unchanged => InputOutcome::Unchanged,
+            };
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let ActiveModal::MemoryBrowser { state } = modal {
             // When the filter input is focused, Esc exits filter mode
@@ -472,6 +507,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Providers { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
             | ActiveModal::RememberNoteReview { .. } => unreachable!(),
@@ -548,16 +584,25 @@ impl AgentView {
                 }) = self.active_modal.as_mut()
                 {
                     let q = state.query.to_lowercase();
-                    *items = original_items
-                        .iter()
-                        .filter(|item| {
-                            q.is_empty()
-                                || item.match_text.to_lowercase().contains(&q)
-                                || item.display.to_lowercase().contains(&q)
-                                || item.description.to_lowercase().contains(&q)
-                        })
-                        .cloned()
-                        .collect();
+                    // Model rows carry identity metadata (`model_id`) and use
+                    // the deterministic weighted ranker: direct provider/model
+                    // matches beat display-name fuzzy proxies. Other pickers
+                    // keep the simple substring filter.
+                    if original_items.iter().any(|item| item.model_id.is_some()) {
+                        *items =
+                            crate::slash::commands::model::rank_model_items(original_items, &q);
+                    } else {
+                        *items = original_items
+                            .iter()
+                            .filter(|item| {
+                                q.is_empty()
+                                    || item.match_text.to_lowercase().contains(&q)
+                                    || item.display.to_lowercase().contains(&q)
+                                    || item.description.to_lowercase().contains(&q)
+                            })
+                            .cloned()
+                            .collect();
+                    }
                     state.selected = state.selected.min(items.len().saturating_sub(1));
                 }
                 InputOutcome::Changed
@@ -818,7 +863,7 @@ impl AgentView {
                                             })
                                         };
                                         self.active_modal = Some(ActiveModal::ArgPicker {
-                                            command: trimmed,
+                                            command: trimmed.clone(),
                                             args_query: String::new(),
                                             items: items.clone(),
                                             original_items: items,
@@ -829,6 +874,13 @@ impl AgentView {
                                             window:
                                                 crate::views::modal_window::ModalWindowState::new(),
                                         });
+                                        // Model picker: render from current
+                                        // state now, refresh the provider
+                                        // catalog in the background (one
+                                        // coalesced effect per open).
+                                        if matches!(trimmed.as_str(), "model" | "m") {
+                                            return InputOutcome::Action(Action::RefreshProviders);
+                                        }
                                         return InputOutcome::Changed;
                                     }
                                 }
@@ -1461,6 +1513,20 @@ impl AgentView {
             }
         }
 
+        // Providers: modal chrome only (close button); rows are keyboard-driven.
+        if let Some(ActiveModal::Providers { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Handled => return InputOutcome::Changed,
+                _ => return InputOutcome::Unchanged,
+            }
+        }
+
         // MemoryBrowser: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::MemoryBrowser { state }) = &mut self.active_modal {
             let outcome =
@@ -1702,11 +1768,18 @@ impl AgentView {
             {
                 // Arg picker: ModalWindow chrome + picker content.
                 let title = match command.as_str() {
-                    "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                    "model" | "m" => "Pick model",
-                    "theme" | "t" => "Pick theme",
-                    _ => "Pick option",
+                    "model" | "m" if !args_query.is_empty() => "Pick reasoning effort".to_string(),
+                    // Surface the provider-catalog freshness notice inline —
+                    // the picker never closes or moves selection while a
+                    // background refresh is in flight.
+                    "model" | "m" => match self.session.models.catalog_notice.as_deref() {
+                        Some(notice) => format!("Pick model \u{b7} {notice}"),
+                        None => "Pick model".to_string(),
+                    },
+                    "theme" | "t" => "Pick theme".to_string(),
+                    _ => "Pick option".to_string(),
                 };
+                let title = title.as_str();
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
                     .enumerate()
@@ -2235,6 +2308,17 @@ impl AgentView {
                 }
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::Providers {
+                state: providers_state,
+            } = active_modal
+            {
+                crate::views::providers_modal::render_providers_overlay(
+                    buf,
+                    area,
+                    providers_state,
+                    compact,
+                    &theme,
+                );
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal

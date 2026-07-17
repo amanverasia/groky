@@ -15,6 +15,9 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
 
         // Override app-level default with the active agent's model.
         let mut app_models = new_models.clone();
+        // The wire payload has no freshness field; keep the notice the
+        // providers/update path last delivered.
+        app_models.catalog_notice = app.models.catalog_notice.clone();
         if let ActiveView::Agent(id) = app.active_view
             && let Some(agent) = app.agents.get(&id)
             && let Some(ref agent_model) = agent.session.models.current
@@ -559,4 +562,35 @@ mod presence_aware_dto_tests {
             "string must be Some(Some(_))"
         );
     }
+}
+
+/// Handle `x.ai/providers/update` — provider availability changed (key
+/// stored/cleared or catalog refreshed). Payload: `{ "providers": [rows] }`,
+/// secret-free. Replaces the rows of any open `/providers` modal.
+pub(super) fn handle_providers_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(update) =
+        serde_json::from_str::<crate::providers::ProviderListResponse>(notif.params.get())
+    else {
+        tracing::warn!("Failed to parse x.ai/providers/update");
+        return false;
+    };
+    let rows = crate::providers::provider_rows(&update);
+    // Keep the `/model` picker's freshness notice live: `None` (fresh)
+    // clears it; refreshing/cached strings render in the picker title
+    // without closing the picker or moving selection.
+    let notice = crate::providers::catalog_notice_for_status(&update.refresh_status);
+    let notice_changed = app.models.catalog_notice != notice;
+    app.models.catalog_notice = notice.clone();
+    for agent in app.agents.values_mut() {
+        agent.session.models.catalog_notice = notice.clone();
+    }
+    let mut applied = notice_changed;
+    for agent in app.agents.values_mut() {
+        if let Some(crate::views::modal::ActiveModal::Providers { state }) = &mut agent.active_modal
+        {
+            state.apply_update(rows.clone());
+            applied = true;
+        }
+    }
+    applied
 }

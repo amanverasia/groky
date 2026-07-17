@@ -13,6 +13,21 @@ pub(super) const LEGACY_SCOPE: &str = "https://accounts.x.ai/sign-in";
 /// auth.json scope key for plain API key auth (desktop login, `grok login --api-key`).
 pub const API_KEY_SCOPE: &str = "xai::api_key";
 
+/// Validated auth.json scope key for a third-party provider API key:
+/// `provider::<id>`. The provider ID must be non-empty and contain only
+/// lowercase ASCII letters, digits, `-`, or `_`, so a hostile ID can never
+/// collide with the `xai::*` or OAuth scope namespaces.
+pub fn provider_api_key_scope(provider_id: &str) -> Result<String, &'static str> {
+    if provider_id.is_empty()
+        || !provider_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
+    {
+        return Err("provider id must contain only lowercase ASCII letters, digits, '-' or '_'");
+    }
+    Ok(format!("provider::{provider_id}"))
+}
+
 const BLOCKED_REASON_NO_LOGS: &str = "BLOCKED_REASON_NO_LOGS";
 const BLOCKED_REASON_NO_LOGS_MODERATED: &str = "BLOCKED_REASON_NO_LOGS_MODERATED";
 

@@ -2939,6 +2939,9 @@ impl acp::Agent for MvpAgent {
             s if s.starts_with("x.ai/auth/") => {
                 crate::extensions::auth::handle(self, &args).await
             }
+            s if s.starts_with("x.ai/providers/") => {
+                crate::extensions::providers::handle(self, &args).await
+            }
             s if s.starts_with("x.ai/session_summaries/") => {
                 crate::agent::handlers::session::handle(self, &args).await
             }

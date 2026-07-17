@@ -113,6 +113,17 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         resolve: |_args| BuiltinAction::ContextInfo,
     },
     BuiltinCommand {
+        name: "providers",
+        description: "Manage model provider API keys and availability",
+        argument_hint: None,
+        aliases: &["login"],
+        gate: BuiltinGate::AlwaysOn,
+        // Metadata-only advertisement: the pager renders the provider
+        // surface client-side (like /context). Bare-text clients get a
+        // no-op end-of-turn.
+        resolve: |_args| BuiltinAction::Providers,
+    },
+    BuiltinCommand {
         name: "hooks-trust",
         description: "Trust this project for hook execution",
         argument_hint: None,
@@ -615,6 +626,9 @@ pub(super) enum BuiltinAction {
     FlushMemory,
     Dream,
     ContextInfo,
+    /// `/providers` (alias `/login`): metadata-only; the pager renders the
+    /// provider management surface client-side.
+    Providers,
     HooksTrust,
     HooksList,
     HooksAdd {
@@ -670,6 +684,7 @@ impl BuiltinAction {
             BuiltinAction::FlushMemory => "flush",
             BuiltinAction::Dream => "dream",
             BuiltinAction::ContextInfo => "context",
+            BuiltinAction::Providers => "providers",
             BuiltinAction::HooksTrust => "hooks-trust",
             BuiltinAction::HooksList => "hooks-list",
             BuiltinAction::HooksAdd { .. } => "hooks-add",
@@ -702,6 +717,7 @@ impl BuiltinAction {
             BuiltinAction::FlushMemory => false,
             BuiltinAction::Dream => false,
             BuiltinAction::ContextInfo => false,
+            BuiltinAction::Providers => false,
             BuiltinAction::HooksTrust => false,
             BuiltinAction::HooksList => false,
             BuiltinAction::HooksAdd { .. } => true,

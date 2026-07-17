@@ -598,6 +598,22 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// Open the provider management picker (`/providers`, alias `/login`
+    /// inside a session). Lists providers and their key status.
+    OpenProviders,
+    /// Store an API key for a provider (from the masked key entry). The
+    /// key travels only inside [`crate::providers::SecretKey`], whose
+    /// `Debug` output is redacted.
+    StoreProviderKey {
+        provider_id: String,
+        api_key: crate::providers::SecretKey,
+    },
+    /// Clear the stored API key for a provider.
+    ClearProviderKey {
+        provider_id: String,
+    },
+    /// Start a coalesced background provider-catalog refresh.
+    RefreshProviders,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -1664,6 +1680,19 @@ pub enum Effect {
         session_id: acp::SessionId,
         cache: bool,
     },
+    /// Fetch the provider list (x.ai/providers/list).
+    ListProviders,
+    /// Store a provider API key (x.ai/providers/store_key). The raw JSON
+    /// request body is constructed only at effect execution; the key is
+    /// carried in a Debug-redacted [`crate::providers::SecretKey`].
+    StoreProviderKey {
+        provider_id: String,
+        api_key: crate::providers::SecretKey,
+    },
+    /// Clear a provider's stored API key (x.ai/providers/clear_key).
+    ClearProviderKey { provider_id: String },
+    /// Start a coalesced provider-catalog refresh (x.ai/providers/refresh).
+    RefreshProviders,
     /// Trigger MCP OAuth for a server (x.ai/mcp/auth_trigger).
     McpAuthTrigger {
         agent_id: AgentId,
@@ -2314,6 +2343,25 @@ pub enum TaskResult {
     McpsListLoaded {
         agent_id: AgentId,
         result: Result<Vec<crate::views::mcps_modal::McpServerInfo>, String>,
+    },
+    /// Provider list fetched (x.ai/providers/list). Secret-free.
+    ProvidersListLoaded {
+        result: Result<crate::providers::ProviderListResponse, String>,
+    },
+    /// Provider key stored (x.ai/providers/store_key). Carries only the
+    /// provider ID and resulting status — never the key.
+    ProviderKeyStored {
+        provider_id: String,
+        result: Result<crate::providers::ProviderStatus, String>,
+    },
+    /// Provider key cleared (x.ai/providers/clear_key). Secret-free.
+    ProviderKeyCleared {
+        provider_id: String,
+        result: Result<crate::providers::ProviderStatus, String>,
+    },
+    /// Provider catalog refresh requested (x.ai/providers/refresh).
+    ProvidersRefreshRequested {
+        result: Result<bool, String>,
     },
     /// MCP auth trigger completed.
     McpAuthTriggerDone {

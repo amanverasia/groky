@@ -1876,7 +1876,10 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
         api_key: None,
         env_key: None,
         api_base_url: None,
-    };
+    provider_id: None,
+credential_policy: Default::default(),
+            provider_meta: None,
+};
     let mut models = indexmap::IndexMap::new();
     models.insert("a".to_string(), entry("target"));
     models.insert("target".to_string(), entry("other"));

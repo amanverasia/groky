@@ -120,6 +120,10 @@ struct Inner {
     fetch_auth: RwLock<ModelFetchAuth>,
     gateway: RwLock<Option<xai_acp_lib::AcpAgentGatewaySender>>,
     cache: ModelsCacheManager,
+    /// Configured-provider catalog (models.dev via `provider_catalog.json`,
+    /// 24h freshness). `None` until attached at bootstrap; composition is a
+    /// no-op without it. Fully separate from the xAI entitlement pipeline.
+    provider_catalog: RwLock<Option<Arc<crate::agent::provider_catalog::ProviderCatalogAdapter>>>,
     /// Guard to prevent overlapping retry loops.
     retry_in_flight: AtomicBool,
     /// `allowed_models` matched nothing in the fetched catalog; the prompt path
@@ -186,6 +190,7 @@ impl ModelsManager {
                 fetch_auth: RwLock::new(fetch_auth),
                 gateway: RwLock::new(None),
                 cache: ModelsCacheManager::new(),
+                provider_catalog: RwLock::new(None),
                 retry_in_flight: AtomicBool::new(false),
                 allowlist_excludes_all: AtomicBool::new(false),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
@@ -267,8 +272,42 @@ impl ModelsManager {
         Ok(mgr)
     }
 
-    pub(crate) fn set_gateway(&self, gateway: xai_acp_lib::AcpAgentGatewaySender) {
+    /// Attach the client gateway. `pub` (not `pub(crate)`) so integration
+    /// tests can capture broadcast notifications through a bare sender.
+    pub fn set_gateway(&self, gateway: xai_acp_lib::AcpAgentGatewaySender) {
         *self.inner.gateway.write() = Some(gateway);
+    }
+
+    /// The attached configured-provider catalog adapter, if any.
+    pub fn provider_catalog(
+        &self,
+    ) -> Option<Arc<crate::agent::provider_catalog::ProviderCatalogAdapter>> {
+        self.inner.provider_catalog.read().clone()
+    }
+
+    /// Clone of the current config (provider surface classification needs
+    /// `[provider.<id>]` overrides).
+    pub fn config_snapshot(&self) -> config::Config {
+        self.inner.cfg.read().clone()
+    }
+
+    /// Broadcast an extension notification to connected clients. No-op when
+    /// no gateway is attached (tests, pre-init). Payload must be secret-free.
+    pub fn broadcast_ext_notification<T: serde::Serialize>(&self, method: &str, params: &T) {
+        if let Some(ref gw) = *self.inner.gateway.read()
+            && let Ok(params) = serde_json::value::to_raw_value(params)
+        {
+            gw.forward_fire_and_forget(acp::ExtNotification::new(method.to_owned(), params.into()));
+        }
+    }
+
+    /// Recompose the model catalog from the attached provider adapter (after
+    /// a credential or catalog change) and notify clients. No-op when no
+    /// adapter is attached.
+    pub fn rebuild_provider_models(&self) {
+        if let Some(adapter) = self.provider_catalog() {
+            self.set_provider_catalog(adapter);
+        }
     }
 
     /// Swap config, rebuild catalog, and reselect the model.
@@ -283,7 +322,11 @@ impl ModelsManager {
             return;
         }
         let prefetched = self.inner.prefetched.read().clone();
-        let new_catalog = resolve_model_catalog(&new_config, prefetched);
+        let new_catalog = resolve_model_catalog_with_providers(
+            &new_config,
+            prefetched,
+            self.provider_entries(&new_config),
+        );
         let has_real_catalog = *self.inner.has_fetched_real_catalog.read();
         if has_real_catalog && let Err(e) = validate_selectable(&new_config, &new_catalog) {
             tracing::error!(error = %e, "ignoring config reload: allowed_models excludes all models");
@@ -555,8 +598,37 @@ impl ModelsManager {
 
     // ── Mutations ───────────────────────────────────────────────────
 
+    /// Attach (or replace) the configured-provider catalog and recompose the
+    /// model catalog. Reuses the existing replace machinery: a still-valid
+    /// current selection is preserved (`reselect_current_model_if_missing`)
+    /// and clients get the standard `x.ai/models/update` notification. The
+    /// xAI entitlement pipeline is untouched.
+    pub fn set_provider_catalog(
+        &self,
+        adapter: Arc<crate::agent::provider_catalog::ProviderCatalogAdapter>,
+    ) {
+        *self.inner.provider_catalog.write() = Some(adapter);
+        let cfg = self.inner.cfg.read().clone();
+        let prefetched = self.inner.prefetched.read().clone();
+        self.rebuild(&cfg, prefetched);
+        self.reselect_current_model_if_missing(&cfg);
+        self.notify_models_updated();
+    }
+
+    /// Qualified provider entries from the attached catalog, or empty when
+    /// no adapter is attached.
+    fn provider_entries(&self, cfg: &config::Config) -> IndexMap<String, ModelEntry> {
+        self.inner
+            .provider_catalog
+            .read()
+            .as_ref()
+            .map(|adapter| adapter.configured_model_entries(cfg))
+            .unwrap_or_default()
+    }
+
     fn rebuild(&self, cfg: &config::Config, prefetched: Option<IndexMap<String, ModelEntry>>) {
-        *self.inner.models.write() = resolve_model_catalog(cfg, prefetched);
+        *self.inner.models.write() =
+            resolve_model_catalog_with_providers(cfg, prefetched, self.provider_entries(cfg));
     }
 
     /// Refresh models when the etag changes.
@@ -1389,6 +1461,9 @@ fn build_prefetched_map(
             api_key: None,
             env_key: None,
             api_base_url: m.api_base_url.clone().or(api_base_url_override.clone()),
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         map.insert(key, entry);
     }
@@ -1833,7 +1908,31 @@ pub fn resolve_model_catalog(
     cfg: &config::Config,
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
+    resolve_model_catalog_with_providers(cfg, prefetched, IndexMap::new())
+}
+
+/// [`resolve_model_catalog`] plus configured-provider catalog entries.
+///
+/// The xAI pipeline (`resolve_model_list`) is untouched and resolves first,
+/// preserving xAI keys and default ordering. `provider_entries` (qualified
+/// `provider/model` keys) are then merged in; an explicit
+/// `[model.<qualified-id>]` override is re-applied on top of the provider
+/// entry so config overrides stay last. Model filters, allowlists, and
+/// effort stamping then apply to the combined catalog.
+pub fn resolve_model_catalog_with_providers(
+    cfg: &config::Config,
+    prefetched: Option<IndexMap<String, ModelEntry>>,
+    provider_entries: IndexMap<String, ModelEntry>,
+) -> IndexMap<String, ModelEntry> {
     let mut catalog: IndexMap<String, ModelEntry> = config::resolve_model_list(cfg, prefetched);
+
+    for (key, entry) in provider_entries {
+        let entry = match cfg.config_models.get(&key) {
+            Some(model_override) => model_override.apply(&key, Some(entry), &cfg.endpoints),
+            None => entry,
+        };
+        catalog.insert(key, entry);
+    }
 
     if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
         let before = catalog.len();
@@ -2016,6 +2115,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         flagged.info.show_model_fingerprint = true;
         mgr.insert_test_entry("fp-model", flagged);
@@ -2028,6 +2130,9 @@ mod tests {
                 api_key: None,
                 env_key: None,
                 api_base_url: None,
+                provider_id: None,
+                credential_policy: Default::default(),
+                provider_meta: None,
             },
         );
 
@@ -2038,6 +2143,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         custom.info.show_model_fingerprint = true;
         mgr.insert_test_entry("enterprise-key", custom);
@@ -2208,6 +2316,9 @@ mod tests {
                 api_key: None,
                 env_key: None,
                 api_base_url: None,
+                provider_id: None,
+                credential_policy: Default::default(),
+                provider_meta: None,
             },
         );
 
@@ -2262,6 +2373,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         reasoning_entry.info.supports_reasoning_effort = true;
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
@@ -2284,6 +2398,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         prefetched.insert("plain-model".to_string(), plain_entry);
 
@@ -2311,6 +2428,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         no_none.info.supports_reasoning_effort = true;
         no_none.info.reasoning_efforts = vec![ReasoningEffortOption {
@@ -2329,6 +2449,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         with_none.info.supports_reasoning_effort = true;
         with_none.info.reasoning_efforts = vec![ReasoningEffortOption {
@@ -2435,6 +2558,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         reasoning_entry.info.supports_reasoning_effort = true;
         prefetched.insert("reasoning-model".to_string(), reasoning_entry);
@@ -2444,6 +2570,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         prefetched.insert("plain-model".to_string(), plain_entry);
 
@@ -2486,6 +2615,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         }
     }
 
@@ -3269,6 +3401,9 @@ mod tests {
                 api_key: None,
                 env_key: None,
                 api_base_url: None,
+                provider_id: None,
+                credential_policy: Default::default(),
+                provider_meta: None,
             },
         );
 
@@ -3296,6 +3431,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         oauth_only.info.supported_in_api = false;
         catalog.insert("oauth-only".to_string(), oauth_only);
@@ -3305,6 +3443,9 @@ mod tests {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         catalog.insert("public-model".to_string(), public);
 

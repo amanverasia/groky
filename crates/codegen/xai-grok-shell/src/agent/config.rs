@@ -984,6 +984,12 @@ pub struct Config {
     /// Warnings from `[model.*]` parsing; surfaced by `grok inspect`.
     #[serde(skip)]
     pub model_override_warnings: Vec<super::config_model_override_parse::ModelOverrideWarning>,
+    /// `[provider.*]` static overrides from config.toml.
+    #[serde(skip)]
+    pub config_providers: IndexMap<String, ConfigProviderOverride>,
+    /// Warnings from `[provider.*]` parsing.
+    #[serde(skip)]
+    pub provider_override_warnings: Vec<super::config_model_override_parse::ModelOverrideWarning>,
     pub grok_com_config: GrokComConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<toml::Value>,
@@ -1410,6 +1416,8 @@ impl Default for Config {
             auto_mode: AutoModeConfig::default(),
             config_models: IndexMap::new(),
             model_override_warnings: Vec::new(),
+            config_providers: IndexMap::new(),
+            provider_override_warnings: Vec::new(),
             grok_com_config: GrokComConfig::default(),
             shortcuts: None,
             hints: None,
@@ -1551,13 +1559,19 @@ impl Config {
             warnings: model_override_warnings,
         } = super::config_model_override_parse::parse_model_overrides(raw_config);
         super::config_model_override_parse::log_model_override_warnings(&model_override_warnings);
+        let super::config_model_override_parse::ParsedProviderOverrides {
+            providers: config_providers,
+            warnings: provider_override_warnings,
+        } = super::config_model_override_parse::parse_provider_overrides(raw_config);
         let mut base = toml::Value::try_from(Self::default()).map_err(|e| e.to_string())?;
         if let toml::Value::Table(ref mut t) = base {
             t.remove("model");
+            t.remove("provider");
         }
         let mut raw_without_model_sections = raw_config.clone();
         if let toml::Value::Table(ref mut t) = raw_without_model_sections {
             t.remove("model");
+            t.remove("provider");
         }
         crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
         let (mut config, user_unused) =
@@ -1570,6 +1584,8 @@ impl Config {
         }
         config.config_models = config_models;
         config.model_override_warnings = model_override_warnings;
+        config.config_providers = config_providers;
+        config.provider_override_warnings = provider_override_warnings;
         if config.grok_com_config.oidc.is_none() {
             config.grok_com_config.oidc = OidcAuthConfig::from_env();
         }
@@ -3214,6 +3230,24 @@ impl ConfigModelOverride {
         entry
     }
 }
+/// A `[provider.<id>]` entry from config.toml, parsed directly from raw TOML
+/// (bypassing deep merge), resiliently like `[model.<id>]`: a bad field is
+/// warned about and skipped, never dropping the provider.
+///
+/// Static fields only — discovery/endpoint-probing fields are out of scope
+/// for this struct.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct ConfigProviderOverride {
+    /// Display-name override for the provider.
+    pub name: Option<String>,
+    /// Base URL override; maps onto the catalog provider's `api_base_url`.
+    pub base_url: Option<String>,
+    /// Env var name(s) holding the provider API key — string or array.
+    pub env_key: Option<EnvKeys>,
+    /// Whether the provider allows unauthenticated use.
+    pub unauthenticated: Option<bool>,
+}
 /// Shared model metadata — the common fields across all model sources.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelInfo {
@@ -3387,6 +3421,39 @@ impl ModelInfo {
         !self.hidden && (is_session_auth || self.supported_in_api)
     }
 }
+/// How credentials are resolved for a [`ModelEntry`].
+///
+/// Defaults to [`CredentialPolicy::XaiLegacy`] so every pre-existing entry
+/// (including old `models_cache.json` snapshots) keeps the current xAI
+/// resolution order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPolicy {
+    /// Current xAI order: model api_key/env_key > session token > XAI_API_KEY.
+    #[default]
+    XaiLegacy,
+    /// Catalog provider key: session provider key > stored provider key >
+    /// catalog env vars > model api_key/env_key. Never the xAI session token
+    /// or `XAI_API_KEY`.
+    ProviderApiKey,
+    /// Model-supplied api_key/env_key only; no fallbacks.
+    ExplicitModel,
+    /// No credential is attached (unauthenticated providers).
+    None,
+}
+/// Secret-free display/pricing metadata carried by catalog provider entries.
+/// Never contains credentials, env var values, or credential origins.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProviderModelMeta {
+    /// Human-readable provider display name (e.g. "OpenAI").
+    pub provider_name: String,
+    /// Input token cost per million (USD), when the catalog knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cost_per_million: Option<f64>,
+    /// Output token cost per million (USD), when the catalog knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_cost_per_million: Option<f64>,
+}
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
 /// Routing reads fields, not provenance.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3396,6 +3463,15 @@ pub struct ModelEntry {
     pub env_key: Option<EnvKeys>,
     /// When set, `base_url` is used for session auth, `api_base_url` for API-key auth.
     pub api_base_url: Option<String>,
+    /// Catalog provider this entry came from; `None` for xAI/config entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<xai_grok_catalog::ProviderId>,
+    /// Credential resolution policy; defaults to the legacy xAI order.
+    #[serde(default)]
+    pub credential_policy: CredentialPolicy,
+    /// Provider display/pricing metadata for catalog entries; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_meta: Option<ProviderModelMeta>,
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
@@ -3407,6 +3483,9 @@ impl ModelEntry {
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: CredentialPolicy::default(),
+            provider_meta: None,
         }
     }
     pub fn info(&self) -> &ModelInfo {
@@ -3418,6 +3497,9 @@ impl ModelEntry {
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             api_base_url: entry.api_base_url.clone(),
+            provider_id: None,
+            credential_policy: CredentialPolicy::default(),
+            provider_meta: None,
         }
     }
     /// The model's own (BYOK) credential: a non-empty `api_key`, else the first
@@ -3807,7 +3889,97 @@ pub(crate) fn first_own_credential(
 ///
 /// When `env_key` lists multiple names, the first set non-empty value is used.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
+    resolve_credentials_with(
+        model,
+        session_key,
+        || crate::agent::auth_method::read_xai_api_key_env().ok(),
+        |_| None,
+        |provider_id| {
+            crate::auth::read_provider_api_key(&crate::util::grok_home::grok_home(), provider_id)
+        },
+    )
+}
+/// Injectable credential-resolution seam, dispatched on the entry's
+/// [`CredentialPolicy`].
+///
+/// - `XaiLegacy`: current behavior, unchanged — model api_key/env_key >
+///   `session_key` > `xai_env_key()`.
+/// - `ProviderApiKey`: `session_provider_key` > `stored_provider_key` >
+///   catalog provider env vars > model api_key/env_key. The xAI session
+///   token and `XAI_API_KEY` are **never** consulted.
+/// - `ExplicitModel`: model api_key/env_key only; no fallbacks.
+/// - `None`: no key is attached.
+pub fn resolve_credentials_with(
+    model: &ModelEntry,
+    session_key: Option<&str>,
+    xai_env_key: impl FnOnce() -> Option<String>,
+    session_provider_key: impl FnOnce(&str) -> Option<String>,
+    stored_provider_key: impl FnOnce(&str) -> Option<String>,
+) -> ResolvedCredentials {
     let info = model.info();
+    match model.credential_policy {
+        CredentialPolicy::XaiLegacy => {}
+        CredentialPolicy::ProviderApiKey => {
+            let provider = model
+                .provider_id
+                .as_ref()
+                .map(xai_grok_catalog::ProviderId::as_str);
+            let (api_key, origin) = provider
+                .and_then(|p| session_provider_key(p).map(|k| (k, "session_provider")))
+                .or_else(|| {
+                    model
+                        .provider_id
+                        .as_ref()
+                        .and_then(|p| stored_provider_key(p.as_str()).map(|k| (k, "stored")))
+                })
+                .or_else(|| {
+                    // Entry env_key (catalog provider env names, including any
+                    // `[provider.<id>] env_key` override applied at composition
+                    // time) replaces the embedded-catalog fallback entirely.
+                    match model.env_key.as_ref().filter(|keys| !keys.is_empty()) {
+                        Some(keys) => keys.resolve_value(),
+                        None => model
+                            .provider_id
+                            .as_ref()
+                            .and_then(catalog_provider_env_credential),
+                    }
+                    .map(|k| (k, "environment"))
+                })
+                .or_else(|| model.own_credential().map(|k| (k, "model")))
+                .map_or((None, "none"), |(k, origin)| (Some(k), origin));
+            tracing::debug!(
+                model = % info.model, origin, "resolved provider credentials"
+            );
+            return ResolvedCredentials {
+                api_key,
+                base_url: info.base_url.clone(),
+                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_scheme: info.auth_scheme,
+            };
+        }
+        CredentialPolicy::ExplicitModel => {
+            let api_key = model.own_credential();
+            tracing::debug!(
+                model = % info.model, origin = if api_key.is_some() { "model" } else { "none" },
+                "resolved explicit-model credentials"
+            );
+            return ResolvedCredentials {
+                api_key,
+                base_url: info.base_url.clone(),
+                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_scheme: info.auth_scheme,
+            };
+        }
+        CredentialPolicy::None => {
+            tracing::debug!(model = % info.model, origin = "none", "unauthenticated provider");
+            return ResolvedCredentials {
+                api_key: None,
+                base_url: info.base_url.clone(),
+                auth_type: xai_chat_state::AuthType::ApiKey,
+                auth_scheme: info.auth_scheme,
+            };
+        }
+    }
     let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
@@ -3820,7 +3992,7 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             info.base_url.clone(),
             xai_chat_state::AuthType::SessionToken,
         )
-    } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
+    } else if let Some(key) = xai_env_key() {
         let url = model
             .api_base_url
             .clone()
@@ -3852,6 +4024,22 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
         auth_type,
         auth_scheme,
     }
+}
+/// First set, non-blank value of the provider's catalog env vars (embedded
+/// catalog plus reviewed overrides). Env var *names* are not secrets; values
+/// are returned to the caller and never logged.
+fn catalog_provider_env_credential(provider_id: &xai_grok_catalog::ProviderId) -> Option<String> {
+    static CATALOG: std::sync::OnceLock<xai_grok_catalog::NormalizedCatalog> =
+        std::sync::OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| {
+        xai_grok_catalog::apply_patch(
+            xai_grok_catalog::embedded_catalog(),
+            xai_grok_catalog::load_overrides(),
+        )
+        .unwrap_or_else(|_| xai_grok_catalog::embedded_catalog())
+    });
+    let provider = catalog.provider(provider_id)?;
+    EnvKeys::new(provider.env_vars.iter().cloned()).resolve_value()
 }
 /// `disable_api_key_auth` at the credential seam: swap a first-party xAI API
 /// key for the IdP session (absent => request fails => forces login). BYOK
@@ -4042,6 +4230,9 @@ pub fn resolve_aux_model_sampling_config(
             api_key: Some(bearer),
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         };
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         let sampler = sampling_config_for_model(
@@ -4265,6 +4456,9 @@ fn resolve_hidden_default_web_search_sampling_config(
         api_key: None,
         env_key: None,
         api_base_url: None,
+        provider_id: None,
+        credential_policy: Default::default(),
+        provider_meta: None,
     };
     let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
     sampling_config_for_model(
@@ -4351,6 +4545,39 @@ pub fn to_acp_model_info(
                         REASONING_EFFORTS_META_KEY.to_string(),
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
                     );
+                }
+                // Provider context for catalog entries. Secret-free by
+                // construction: ids, display name, and public pricing only —
+                // never keys, env var values, or credential origins.
+                if let Some(provider_id) = &model.provider_id {
+                    map.insert(
+                        "providerId".to_string(),
+                        serde_json::Value::String(provider_id.as_str().to_owned()),
+                    );
+                }
+                if let Some(provider_meta) = &model.provider_meta {
+                    map.insert(
+                        "providerName".to_string(),
+                        serde_json::Value::String(provider_meta.provider_name.clone()),
+                    );
+                    if let Some(cost) = provider_meta
+                        .input_cost_per_million
+                        .and_then(serde_json::Number::from_f64)
+                    {
+                        map.insert(
+                            "inputCostPerMillion".to_string(),
+                            serde_json::Value::Number(cost),
+                        );
+                    }
+                    if let Some(cost) = provider_meta
+                        .output_cost_per_million
+                        .and_then(serde_json::Number::from_f64)
+                    {
+                        map.insert(
+                            "outputCostPerMillion".to_string(),
+                            serde_json::Value::Number(cost),
+                        );
+                    }
                 }
                 if map.is_empty() { None } else { Some(map) }
             };
@@ -4941,6 +5168,9 @@ reasoning_effort = "low"
             api_key: api_key.map(|s| s.to_string()),
             env_key: env_key.map(EnvKeys::single),
             api_base_url: api_base_url.map(|s| s.to_string()),
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         }
     }
     /// The effective-model RE-support lookup must use the model ACTUALLY used:
@@ -9594,6 +9824,9 @@ default = "grok-4.5"
             api_key: None,
             env_key: None,
             api_base_url: None,
+            provider_id: None,
+            credential_policy: Default::default(),
+            provider_meta: None,
         }
     }
     #[test]

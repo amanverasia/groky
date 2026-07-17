@@ -77,7 +77,7 @@ pub enum CommandResult {
 }
 
 /// A suggestion item for command argument completion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ArgItem {
     /// Display text shown in the dropdown.
     pub display: String,
@@ -87,6 +87,14 @@ pub struct ArgItem {
     pub insert_text: String,
     /// Description shown alongside the item.
     pub description: String,
+    /// Deterministic weighted ranking score for the `/model` picker.
+    /// `None` for every non-model picker (and for unranked model rows);
+    /// `Some` only on rows returned by the model ranker, where direct
+    /// provider/model matches outweigh fuzzy display-name proxies.
+    pub explicit_score: Option<i64>,
+    /// Catalog model id for `/model` rows (e.g. `openai/gpt-5`).
+    /// `None` for every non-model picker.
+    pub model_id: Option<String>,
 }
 
 /// Read-only context for generating suggestions.

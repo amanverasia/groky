@@ -1,0 +1,42 @@
+{
+  "providers": [
+    {
+      "id": "anthropic",
+      "api_base_url": "https://api.anthropic.com/v1"
+    },
+    {
+      "id": "cerebras",
+      "api_base_url": "https://api.cerebras.ai/v1"
+    },
+    {
+      "id": "deepinfra",
+      "api_base_url": "https://api.deepinfra.com/v1/openai"
+    },
+    {
+      "id": "groq",
+      "api_base_url": "https://api.groq.com/openai/v1"
+    },
+    {
+      "id": "mistral",
+      "api_base_url": "https://api.mistral.ai/v1"
+    },
+    {
+      "id": "openai",
+      "api_base_url": "https://api.openai.com/v1"
+    },
+    {
+      "id": "perplexity",
+      "api_base_url": "https://api.perplexity.ai"
+    },
+    {
+      "id": "togetherai",
+      "api_base_url": "https://api.together.xyz/v1"
+    },
+    {
+      "id": "xai",
+      "api_base_url": "https://api.x.ai/v1",
+      "env_vars": ["XAI_API_KEY"],
+      "models": []
+    }
+  ]
+}

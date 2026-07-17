@@ -286,6 +286,10 @@ pub enum ActiveModal {
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
+    /// Provider management picker (/providers, /login).
+    Providers {
+        state: Box<crate::views::providers_modal::ProvidersModalState>,
+    },
     /// Settings modal (F2, /settings, palette). Boxed — large state.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
@@ -611,6 +615,7 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Providers { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
@@ -640,6 +645,7 @@ impl ActiveModal {
             ActiveModal::DocViewer { title, .. } => title.as_str(),
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
+            ActiveModal::Providers { .. } => "Providers",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
