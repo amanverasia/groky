@@ -700,6 +700,23 @@ impl ProviderCatalogAdapter {
                 let adapter = Arc::clone(&adapter);
                 let on_event = Arc::clone(&on_event);
                 tokio::spawn(async move {
+                    /// Removes the provider from the in-flight set on drop,
+                    /// so a panic inside `refresh_dynamic` (or the event
+                    /// callback) cannot block future background refreshes
+                    /// for this provider forever.
+                    struct InFlightGuard {
+                        in_flight: Arc<parking_lot::Mutex<HashSet<String>>>,
+                        provider_id: String,
+                    }
+                    impl Drop for InFlightGuard {
+                        fn drop(&mut self) {
+                            self.in_flight.lock().remove(&self.provider_id);
+                        }
+                    }
+                    let _in_flight_guard = InFlightGuard {
+                        in_flight: Arc::clone(&adapter.dynamic_in_flight),
+                        provider_id: provider_id.as_str().to_owned(),
+                    };
                     let _permit = Arc::clone(&adapter.dynamic_semaphore)
                         .acquire_owned()
                         .await
@@ -708,10 +725,6 @@ impl ProviderCatalogAdapter {
                         provider_id: provider_id.clone(),
                     });
                     let result = adapter.refresh_dynamic(&provider_id).await;
-                    adapter
-                        .dynamic_in_flight
-                        .lock()
-                        .remove(provider_id.as_str());
                     match result {
                         Ok(event) => on_event(event),
                         Err(err) => on_event(ProviderCatalogEvent::DynamicRefreshFailed {

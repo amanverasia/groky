@@ -256,6 +256,105 @@ async fn sampler_handoff_carries_key_without_leaking_it() {
     assert!(!debug.contains(SECRET), "Debug must redact: {debug}");
 }
 
+/// A 401 with nothing to fall back to fails with concise auth guidance
+/// that leaks neither the endpoint URL nor any bearer text.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_failure_without_fallback_reports_secret_free_guidance() {
+    const SECRET: &str = "sk-rejected-secret-401";
+    let tmp = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let adapter = Arc::new(ProviderCatalogAdapter::from_grok_home(
+        tmp.path().to_path_buf(),
+    ));
+    // Authenticated provider, no cache, no static models.
+    let mut config = dynamic_config("localgw", &format!("{}/v1", server.uri()));
+    config.unauthenticated = false;
+    adapter.configure_dynamic(config).unwrap();
+    adapter.set_session_key(&provider_id("localgw"), SECRET.to_string());
+
+    let event = adapter
+        .refresh_dynamic(&provider_id("localgw"))
+        .await
+        .unwrap();
+    let ProviderCatalogEvent::DynamicRefreshFailed {
+        provider_id: failed_id,
+        message,
+    } = event
+    else {
+        panic!("expected DynamicRefreshFailed, got: {event:?}");
+    };
+    assert_eq!(failed_id, provider_id("localgw"));
+    let lower = message.to_lowercase();
+    assert!(
+        lower.contains("authentication") && lower.contains("key"),
+        "message must give auth/key guidance: {message}"
+    );
+    assert!(
+        !message.contains(&server.uri()) && !message.contains("/v1/models"),
+        "auth failure must not embed the endpoint URL: {message}"
+    );
+    assert!(
+        !message.contains(SECRET) && !lower.contains("sk-") && !lower.contains("bearer"),
+        "auth failure must not embed bearer text: {message}"
+    );
+}
+
+/// A 401 with a warm last-known-good cache serves the cached models.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_failure_with_warm_cache_falls_back_to_cached_models() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let cache = DynamicCache::new(tmp.path().join(DYNAMIC_MODELS_CACHE_FILE));
+    cache
+        .store_provider(CachedProviderModels {
+            provider_id: provider_id("localgw"),
+            base_url: format!("{}/v1", server.uri()),
+            fetched_at_unix: 1_721_088_000,
+            models: vec![CachedModel {
+                id: ModelId::new("cached-model").unwrap(),
+                name: None,
+            }],
+        })
+        .await
+        .unwrap();
+
+    let adapter = Arc::new(ProviderCatalogAdapter::from_grok_home(
+        tmp.path().to_path_buf(),
+    ));
+    let mut config = dynamic_config("localgw", &format!("{}/v1", server.uri()));
+    config.unauthenticated = false;
+    adapter.configure_dynamic(config).unwrap();
+
+    let event = adapter
+        .refresh_dynamic(&provider_id("localgw"))
+        .await
+        .unwrap();
+    assert_eq!(
+        event,
+        ProviderCatalogEvent::DynamicRefreshComplete {
+            provider_id: provider_id("localgw"),
+            model_count: 1,
+            cached: true,
+        }
+    );
+    let snapshot = adapter.snapshot();
+    let provider = snapshot.catalog().provider_str("localgw").unwrap();
+    assert_eq!(provider.models.len(), 1);
+    assert_eq!(provider.models[0].id.as_str(), "cached-model");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_refreshes_do_not_lose_cache_updates() {
     let tmp = tempfile::tempdir().unwrap();
