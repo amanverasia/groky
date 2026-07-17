@@ -54,7 +54,12 @@ async fn mock_models_server(bodies: &[(&str, Option<&str>)]) -> MockServer {
 #[serial(provider_env)]
 async fn refresh_publishes_discovered_models_without_changing_selection() {
     let tmp = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    // Both vars so an ambient GROKY_HOME (which takes precedence) can't
+    // leak the real home into the test; mirrors `GrokHomeFixture`.
+    unsafe {
+        std::env::set_var("GROKY_HOME", tmp.path());
+        std::env::set_var("GROK_HOME", tmp.path());
+    };
 
     let server = mock_models_server(&[("alpha", None), ("beta", Some("Beta"))]).await;
     let base_url = format!("{}/v1", server.uri());

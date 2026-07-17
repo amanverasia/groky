@@ -8,6 +8,10 @@ fn grok_home_override_path_helpers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let grok_home = tmp.path().to_path_buf();
     unsafe {
+        // Clear GROKY_HOME (which would take precedence and leak the real
+        // home) so the legacy GROK_HOME override — and its `$GROK_HOME`
+        // display label — is what resolves.
+        std::env::remove_var("GROKY_HOME");
         std::env::set_var("GROK_HOME", &grok_home);
     }
 

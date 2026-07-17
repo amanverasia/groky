@@ -152,7 +152,12 @@ fn shared_grok_home() -> &'static std::path::Path {
 /// sampling-config path for one picker key / upstream ID pair.
 async fn run_handler_level_roundtrip(picker_key: &str, upstream_id: &str) {
     let home = shared_grok_home();
-    unsafe { std::env::set_var("GROK_HOME", home) };
+    // Both vars so an ambient GROKY_HOME (which takes precedence) can't
+    // leak the real home into the test; mirrors `GrokHomeFixture`.
+    unsafe {
+        std::env::set_var("GROKY_HOME", home);
+        std::env::set_var("GROK_HOME", home);
+    };
 
     let server = MockInferenceServer::start_with_required_auth(janus_models(), JANUS_KEY)
         .await

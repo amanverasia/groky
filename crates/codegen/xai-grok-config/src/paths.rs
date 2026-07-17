@@ -59,15 +59,19 @@ pub fn resolve_grok_home_with(
 
 /// One-time migration of a legacy `~/.grok` tree to the new `~/.groky` home.
 ///
-/// Recursively copies `legacy` → `new`, preserving file permissions (on Unix
-/// `std::fs::copy` copies mode bits, so `auth.json` stays `0600`). Symlinks
-/// and other non-file/non-dir entries are skipped with a warning. The legacy
-/// tree is never modified or deleted.
+/// Recursively copies `legacy` into a sibling staging dir
+/// (`~/.groky.migrating-<pid>`) preserving file permissions (on Unix
+/// `std::fs::copy` copies mode bits, so `auth.json` stays `0600`), then
+/// atomically renames it to `new` on success. Symlinks and other
+/// non-file/non-dir entries are skipped with a warning. The legacy tree is
+/// never modified or deleted.
 ///
 /// Returns `Ok(true)` when a migration ran, `Ok(false)` when it was skipped
 /// (`new` already exists, or `legacy` is not a directory), and `Err` on copy
-/// failure (a partially-copied `new` may remain; callers fall back to using
-/// it / creating it fresh rather than crashing).
+/// failure. On failure the staging dir is removed and `new` is left absent,
+/// so a partial copy can never masquerade as a completed migration or block
+/// a later retry; callers fall back to creating `new` fresh rather than
+/// crashing.
 pub fn migrate_legacy_home(
     legacy: &std::path::Path,
     new: &std::path::Path,
@@ -75,7 +79,27 @@ pub fn migrate_legacy_home(
     if new.exists() || !legacy.is_dir() {
         return Ok(false);
     }
-    copy_dir_recursive(legacy, new)?;
+    let staging_name = format!(
+        "{}.migrating-{}",
+        new.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "grok-home".to_string()),
+        std::process::id()
+    );
+    let staging = new
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(staging_name);
+    // A crashed earlier attempt by this pid (recycled) may have left the
+    // staging dir behind; start clean.
+    let _ = std::fs::remove_dir_all(&staging);
+    let copied = copy_dir_recursive(legacy, &staging)
+        // Rename is atomic: `new` appears fully-populated or not at all.
+        .and_then(|()| std::fs::rename(&staging, new));
+    if let Err(error) = copied {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
     Ok(true)
 }
 
@@ -83,10 +107,6 @@ pub fn migrate_legacy_home(
 /// symlinks and other special entries with a warning.
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
-    #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(src) {
-        let _ = std::fs::set_permissions(dst, meta.permissions());
-    }
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -104,6 +124,12 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
                 "skipping non-regular file during grok home migration"
             );
         }
+    }
+    // Dir mode is applied *after* populating so a read-only source dir mode
+    // can't lock us (or failure cleanup) out of the freshly-created copy.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(src) {
+        let _ = std::fs::set_permissions(dst, meta.permissions());
     }
     Ok(())
 }

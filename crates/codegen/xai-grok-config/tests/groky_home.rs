@@ -198,5 +198,69 @@ fn init_falls_back_to_fresh_groky_when_copy_fails() {
 
     assert_eq!(resolved, tmp.path().join(".groky"));
     assert!(resolved.is_dir(), "fresh ~/.groky created despite copy failure");
+    assert_eq!(
+        std::fs::read_dir(&resolved).unwrap().count(),
+        0,
+        "fallback ~/.groky must be fresh-empty, never a partial copy"
+    );
     assert!(legacy.join("config.toml").exists(), "legacy tree never deleted");
+    assert_no_staging_leftovers(tmp.path());
+}
+
+/// A mid-copy failure (some entries copied, then an unreadable subdir aborts)
+/// must not leave a partial `~/.groky` behind: the target stays absent so a
+/// later run — once the obstacle is gone — migrates fully instead of being
+/// locked out by the partial tree.
+#[cfg(unix)]
+#[test]
+fn failed_migration_leaves_no_partial_groky_and_retry_migrates_fully() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let legacy = tmp.path().join(".grok");
+    let new = tmp.path().join(".groky");
+    std::fs::create_dir_all(legacy.join("locked")).unwrap();
+    std::fs::write(legacy.join("a.txt"), "a").unwrap();
+    std::fs::write(legacy.join("locked").join("inner.txt"), "inner").unwrap();
+    std::fs::set_permissions(&legacy.join("locked"), std::fs::Permissions::from_mode(0o000))
+        .unwrap();
+
+    if std::fs::read_dir(legacy.join("locked")).is_ok() {
+        std::fs::set_permissions(&legacy.join("locked"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        eprintln!("skipping: cannot make subdir unreadable (running as root?)");
+        return;
+    }
+
+    let result = migrate_legacy_home(&legacy, &new);
+    // Restore perms first so TempDir cleanup works even if asserts fail.
+    std::fs::set_permissions(&legacy.join("locked"), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+
+    assert!(result.is_err(), "mid-copy failure must surface as Err");
+    assert!(
+        !new.exists(),
+        "a failed migration must not leave a partial ~/.groky that blocks retries"
+    );
+    assert_no_staging_leftovers(tmp.path());
+
+    // Obstacle removed: a retry must migrate the full tree.
+    assert!(migrate_legacy_home(&legacy, &new).unwrap());
+    assert_eq!(std::fs::read_to_string(new.join("a.txt")).unwrap(), "a");
+    assert_eq!(
+        std::fs::read_to_string(new.join("locked").join("inner.txt")).unwrap(),
+        "inner"
+    );
+}
+
+/// No `~/.groky.migrating-*` staging directories may survive a migration
+/// attempt (success or failure) in the home dir.
+fn assert_no_staging_leftovers(home: &std::path::Path) {
+    let leftovers: Vec<_> = std::fs::read_dir(home)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".migrating"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging dirs left behind: {leftovers:?}");
 }
