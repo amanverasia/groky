@@ -57,13 +57,20 @@ the full provider configuration guide.
 
 ### One-line installer
 
-> [!NOTE]
-> The hosted installer at groky.dev is not live yet (see
-> [Roadmap / TODO](#roadmap--todo)). For now, build from source below.
+Installs the latest release to `~/.local/bin/groky` (Linux and macOS,
+x86_64 and aarch64; no sudo):
 
 ```sh
-curl -fsSL https://groky.dev/install.sh | bash   # coming soon
+curl -fsSL https://raw.githubusercontent.com/amanverasia/groky/main/install.sh | bash
 ```
+
+Options via environment variables: `GROKY_VERSION=v0.1.0` pins a release,
+`GROKY_INSTALL_DIR` overrides the install directory. The script verifies the
+sha256 checksum of every download. Once groky.dev is live, the same installer
+will be served from `https://groky.dev/install.sh`.
+
+Prebuilt binaries and checksums are also on the
+[releases page](https://github.com/amanverasia/groky/releases).
 
 ### Building from source
 
@@ -85,9 +92,11 @@ cargo build -p xai-grok-pager-bin --release  # release binary: target/release/gr
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
-The binary artifact is named `groky` (upstream ships
-it as `grok`). Add your provider API keys with `/providers` on first launch,
-or sign in with an xAI account.
+The binary artifact is named `groky` (upstream ships it as `grok`).
+Configuration lives under `~/.groky` (override with `GROKY_HOME`; legacy
+`GROK_HOME` and an existing `~/.grok` are honored — the latter is migrated
+automatically on first launch). Add your provider API keys with `/providers`
+on first launch, or sign in with an xAI account.
 
 ## Documentation
 
@@ -132,14 +141,17 @@ See [`TODO.md`](TODO.md) for tracked follow-up work.
 
 Things that do not exist yet:
 
-- [ ] **Releases** — prebuilt binaries for macOS, Linux, and Windows with a
-  versioning/changelog process
-- [ ] **One-line installer** — `curl -fsSL https://groky.dev/install.sh | bash`
-- [ ] **groky.dev website** — landing page and hosted documentation
-- [ ] **Binary/branding rename** — ship the binary as `groky` (currently
-  `xai-grok-pager`, config under `~/.grok/`)
-- [ ] **CI** — build/test/lint pipeline, including the telemetry scan gate and
-  provider-catalog freshness check
+- [x] **Releases** — prebuilt binaries for Linux and macOS (x86_64 + aarch64),
+  tag-driven via GitHub Actions; see [`docs/releasing.md`](docs/releasing.md)
+- [x] **One-line installer** — [`install.sh`](install.sh) with checksum
+  verification
+- [x] **Binary/branding rename** — the binary ships as `groky`; config lives
+  under `~/.groky` (with automatic migration from `~/.grok`)
+- [ ] **groky.dev website** — landing page and hosted documentation (will also
+  serve `install.sh`)
+- [ ] **Windows builds** — currently best-effort/untested
+- [ ] **CI breadth** — build/test/lint pipeline beyond the provider-catalog
+  check, including the telemetry scan gate
 
 ## License
 
