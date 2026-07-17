@@ -119,7 +119,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             to_raw_response(&clear_provider_key(&surface, req)?)
         }
         "x.ai/providers/refresh" => {
-            let req: RefreshRequest = parse_params(args)?;
+            let req = parse_refresh_request(args)?;
             to_raw_response(&refresh_providers(&surface, req))
         }
         _ => Err(acp::Error::method_not_found()),
@@ -127,6 +127,14 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
+
+/// Decodes `x.ai/providers/refresh` params. ACP clients may omit params
+/// (`null`), which must behave as the default non-forced request rather
+/// than failing `invalid_params`.
+pub fn parse_refresh_request(args: &acp::ExtRequest) -> Result<RefreshRequest, acp::Error> {
+    let req: Option<RefreshRequest> = parse_params(args)?;
+    Ok(req.unwrap_or_default())
+}
 
 /// `x.ai/providers/list`: current snapshot state, returned immediately.
 /// Spawns a single coalesced background refresh when the catalog is stale.
@@ -198,16 +206,16 @@ pub fn clear_provider_key(
 }
 
 /// `x.ai/providers/refresh`: start one coalesced background catalog refresh.
-/// Non-forced requests (picker open) respect the 24h staleness gate — a
-/// fresh cache means no network I/O. `force: true` (explicit user refresh)
-/// skips the gate. No model discovery is performed.
+/// Staleness is decided solely by the catalog manager inside the spawned
+/// task: non-forced requests (picker open) run `refresh_if_stale`, so a
+/// fresh cache costs no network I/O (the snapshot's `RefreshStatus` is
+/// frozen at load time and must not be used as a gate). `force: true`
+/// (explicit user refresh) refreshes unconditionally. No model discovery is
+/// performed.
 pub fn refresh_providers(surface: &ProviderSurface, req: RefreshRequest) -> RefreshResponse {
     let Ok(adapter) = require_adapter(surface) else {
         return RefreshResponse { started: false };
     };
-    if !req.force && matches!(*adapter.snapshot().status(), RefreshStatus::Fresh) {
-        return RefreshResponse { started: false };
-    }
     let started = adapter.try_begin_refresh();
     if started {
         spawn_catalog_refresh(surface, adapter, req.force);
@@ -308,9 +316,11 @@ fn broadcast_providers_update(surface: &ProviderSurface, adapter: &ProviderCatal
         .broadcast_ext_notification(PROVIDERS_UPDATE_METHOD, &payload);
 }
 
-/// Background catalog refresh: bounded HTTP fetch, no model discovery. When
-/// `force` is false the manager's 24h staleness gate is authoritative (a
-/// fresh cache performs no network I/O). On a changed catalog, recomposes
+/// Background catalog refresh: bounded HTTP fetch, no model discovery. The
+/// catalog manager is the single staleness authority: when `force` is false
+/// the task runs `refresh_if_stale`, so a fresh cache performs no network
+/// I/O and resolves as `Ok(Fresh)` (still broadcasting so pickers settle);
+/// `force: true` fetches unconditionally. On a changed catalog, recomposes
 /// model availability (which broadcasts `x.ai/models/update`) and pushes a
 /// replacement provider snapshot. The caller must have won
 /// `try_begin_refresh`.
