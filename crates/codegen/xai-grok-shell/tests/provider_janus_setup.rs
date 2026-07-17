@@ -209,7 +209,12 @@ async fn setup_failure_message_redacts_userinfo_in_base_url() {
 async fn setup_janus_acp_response_is_secret_free() {
     const SECRET: &str = "sk-janus-acp-secret-4711";
     let tmp = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    // Both vars so an ambient GROKY_HOME (which takes precedence) can't
+    // leak the real home into the test; mirrors `GrokHomeFixture`.
+    unsafe {
+        std::env::set_var("GROKY_HOME", tmp.path());
+        std::env::set_var("GROK_HOME", tmp.path());
+    };
     let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("gpt-4o")])
         .await
         .unwrap();
@@ -267,7 +272,12 @@ async fn omitted_key_leaves_stored_key_intact() {
 #[serial(provider_env)]
 async fn forced_refresh_rehits_models_even_when_cache_fresh() {
     let tmp = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    // Both vars so an ambient GROKY_HOME (which takes precedence) can't
+    // leak the real home into the test; mirrors `GrokHomeFixture`.
+    unsafe {
+        std::env::set_var("GROKY_HOME", tmp.path());
+        std::env::set_var("GROK_HOME", tmp.path());
+    };
     let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("gpt-4o")])
         .await
         .unwrap();

@@ -688,3 +688,45 @@ fn journal_conversion_respects_deadline_under_contention() {
     let db = WorktreeDb::open_at_with_journal_mode(&path, JournalMode::Truncate).unwrap();
     assert_eq!(journal_mode(&db), "truncate");
 }
+
+#[test]
+fn resolve_grok_home_precedence_groky_then_grok_then_default() {
+    // Serialize with other GROK_HOME-mutating tests and restore env on exit.
+    let _lock = GROK_HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_groky = std::env::var_os("GROKY_HOME");
+    let prev_grok = std::env::var_os("GROK_HOME");
+
+    unsafe {
+        std::env::set_var("GROKY_HOME", "/custom/groky-home");
+        std::env::set_var("GROK_HOME", "/custom/grok-home");
+    }
+    let winner = resolve_grok_home().unwrap();
+
+    unsafe { std::env::remove_var("GROKY_HOME") };
+    let legacy = resolve_grok_home().unwrap();
+
+    unsafe { std::env::remove_var("GROK_HOME") };
+    let fallback = resolve_grok_home();
+
+    // Restore before asserting so a failure can't leak env to other tests.
+    unsafe {
+        match prev_groky {
+            Some(v) => std::env::set_var("GROKY_HOME", v),
+            None => std::env::remove_var("GROKY_HOME"),
+        }
+        match prev_grok {
+            Some(v) => std::env::set_var("GROK_HOME", v),
+            None => std::env::remove_var("GROK_HOME"),
+        }
+    }
+
+    assert_eq!(winner, PathBuf::from("/custom/groky-home"));
+    assert_eq!(legacy, PathBuf::from("/custom/grok-home"));
+    // With neither set, the default is `<home>/.groky` (requires $HOME).
+    if let Ok(fallback) = fallback {
+        assert!(
+            fallback.ends_with(".groky"),
+            "default must be ~/.groky, got {fallback:?}"
+        );
+    }
+}

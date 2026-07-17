@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 // ── Grok state directory ────────────────────────────────────────────────────
 
-/// Grok state directory — always writable (`$GROK_HOME` or `~/.grok`).
+/// Grok state directory — always writable (`$GROKY_HOME`/`$GROK_HOME` or `~/.groky`).
 pub(crate) fn grok_home() -> PathBuf {
     xai_grok_config::grok_home()
 }

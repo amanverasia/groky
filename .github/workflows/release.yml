@@ -1,0 +1,117 @@
+# Builds release tarballs for groky on tag pushes (v*) and publishes them as a
+# GitHub release. workflow_dispatch runs a dry run: artifacts are built and
+# uploaded to the workflow run, but no release is created.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Build jobs run third-party actions and arbitrary build scripts, so they get
+# read-only access; only the publish job needs (and declares) contents: write.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build script (xai-proto-build) looks for protoc via $PROTOC, then
+      # bin/protoc (a dotslash wrapper, unusable on runners without dotslash),
+      # then PATH. Install the same version the dotslash file pins (29.3) so
+      # the PATH fallback finds it.
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Installs the toolchain pinned by rust-toolchain.toml.
+      - run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Derive version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.0-dev" >> "$GITHUB_ENV"
+          fi
+
+      - run: cargo build --release -p xai-grok-pager-bin
+
+      - name: Smoke test
+        run: |
+          out=$(./target/release/groky --version)
+          echo "$out"
+          [[ "$out" == groky\ * ]]
+          # On tag builds the tag's base semver must match the binary's
+          # reported version (e.g. tag v0.1.0-rc.1 passes with a 0.1.0 binary,
+          # tag v0.2.0 fails). Bump the version in
+          # crates/codegen/xai-grok-pager-bin/Cargo.toml before tagging.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            bin_ver=$(echo "$out" | awk '{print $2}')
+            [[ "$VERSION" == "$bin_ver"* ]]
+          fi
+
+      - name: Package
+        run: |
+          staging="groky-${VERSION}-${{ matrix.target }}"
+          mkdir "$staging"
+          cp target/release/groky LICENSE THIRD-PARTY-NOTICES "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$staging.tar.gz" > "$staging.tar.gz.sha256"
+          else
+            shasum -a 256 "$staging.tar.gz" > "$staging.tar.gz.sha256"
+          fi
+          cat "$staging.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: groky-${{ matrix.target }}
+          path: |
+            groky-*.tar.gz
+            groky-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        run: cat dist/*.sha256 > dist/SHA256SUMS && cat dist/SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/groky-*.tar.gz dist/SHA256SUMS

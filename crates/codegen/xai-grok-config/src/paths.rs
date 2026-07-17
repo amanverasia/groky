@@ -11,49 +11,187 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str =
 #[cfg(target_os = "linux")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 
-/// The default user grok directory (`~/.grok`, canonicalized) used when
-/// `GROK_HOME` is unset. Exposed so callers (e.g. display helpers) can detect
-/// whether [`grok_home()`] is the default without duplicating the computation.
+/// The user's home directory, canonicalized.
 ///
 /// Uses [`dunce::canonicalize`] instead of [`std::fs::canonicalize`]: on
 /// Windows, std returns a verbatim path (`\\?\C:\Users\...`) which external
 /// tools choke on — e.g. `git clone` rejects `\\?\` destinations with
 /// "Invalid argument", breaking marketplace cache clones under
-/// `~/.grok/marketplace-cache`. `dunce` strips the prefix whenever the path
+/// `~/.groky/marketplace-cache`. `dunce` strips the prefix whenever the path
 /// is safely representable in legacy form; on non-Windows it is identical to
 /// `std::fs::canonicalize`.
+fn canonical_user_home() -> PathBuf {
+    #[allow(deprecated)]
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    dunce::canonicalize(&home).unwrap_or(home)
+}
+
+/// The default user grok directory (`~/.groky`, canonicalized) used when
+/// neither `GROKY_HOME` nor `GROK_HOME` is set. Exposed so callers (e.g.
+/// display helpers) can detect whether [`grok_home()`] is the default without
+/// duplicating the computation.
 ///
 /// Keep the dunce canonicalization in sync with the hand-rolled duplicate in
 /// `xai_fast_worktree::db::resolve_grok_home` (deliberately standalone crate).
 pub fn default_grok_home() -> PathBuf {
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    dunce::canonicalize(&home).unwrap_or(home).join(".grok")
+    canonical_user_home().join(".groky")
 }
 
-/// Per-user config directory: `$GROK_HOME` or `~/.grok`. Created if needed.
+/// Pure grok-home resolution: `GROKY_HOME` → `GROK_HOME` (legacy) →
+/// `home_dir/.groky`. No filesystem side effects.
+///
+/// Building block of [`grok_home()`], exposed (with explicit env values)
+/// because the memoized `grok_home()` cannot be exercised repeatedly in one
+/// test process.
+pub fn resolve_grok_home_with(
+    env_groky: Option<&str>,
+    env_grok: Option<&str>,
+    home_dir: &std::path::Path,
+) -> PathBuf {
+    if let Some(v) = env_groky {
+        return PathBuf::from(v);
+    }
+    if let Some(v) = env_grok {
+        return PathBuf::from(v);
+    }
+    home_dir.join(".groky")
+}
+
+/// One-time migration of a legacy `~/.grok` tree to the new `~/.groky` home.
+///
+/// Recursively copies `legacy` into a sibling staging dir
+/// (`~/.groky.migrating-<pid>`) preserving file permissions (on Unix
+/// `std::fs::copy` copies mode bits, so `auth.json` stays `0600`), then
+/// atomically renames it to `new` on success. Symlinks and other
+/// non-file/non-dir entries are skipped with a warning. The legacy tree is
+/// never modified or deleted.
+///
+/// Returns `Ok(true)` when a migration ran, `Ok(false)` when it was skipped
+/// (`new` already exists, or `legacy` is not a directory), and `Err` on copy
+/// failure. On failure the staging dir is removed and `new` is left absent,
+/// so a partial copy can never masquerade as a completed migration or block
+/// a later retry; callers fall back to creating `new` fresh rather than
+/// crashing.
+pub fn migrate_legacy_home(
+    legacy: &std::path::Path,
+    new: &std::path::Path,
+) -> std::io::Result<bool> {
+    if new.exists() || !legacy.is_dir() {
+        return Ok(false);
+    }
+    let staging_name = format!(
+        "{}.migrating-{}",
+        new.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "grok-home".to_string()),
+        std::process::id()
+    );
+    let staging = new
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(staging_name);
+    // A crashed earlier attempt by this pid (recycled) may have left the
+    // staging dir behind; start clean.
+    let _ = std::fs::remove_dir_all(&staging);
+    let copied = copy_dir_recursive(legacy, &staging)
+        // Rename is atomic: `new` appears fully-populated or not at all.
+        .and_then(|()| std::fs::rename(&staging, new));
+    if let Err(error) = copied {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+/// Recursively copy `src` dir to `dst`, preserving permissions; skip
+/// symlinks and other special entries with a warning.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if file_type.is_file() {
+            // std::fs::copy preserves permission bits on Unix, so 0600
+            // files (auth.json) stay 0600.
+            std::fs::copy(&from, &to)?;
+        } else {
+            tracing::warn!(
+                path = %from.display(),
+                "skipping non-regular file during grok home migration"
+            );
+        }
+    }
+    // Dir mode is applied *after* populating so a read-only source dir mode
+    // can't lock us (or failure cleanup) out of the freshly-created copy.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(src) {
+        let _ = std::fs::set_permissions(dst, meta.permissions());
+    }
+    Ok(())
+}
+
+/// Non-memoized core of [`grok_home()`]: resolve the home from the given env
+/// values, run the one-time legacy migration when (and only when) the default
+/// path is in play, and create the directory. Exposed for tests; production
+/// code should call [`grok_home()`].
+pub fn init_grok_home_with(
+    env_groky: Option<&str>,
+    env_grok: Option<&str>,
+    home_dir: &std::path::Path,
+) -> PathBuf {
+    let resolved = resolve_grok_home_with(env_groky, env_grok, home_dir);
+    // Migration only ever runs on the default path: an explicit env override
+    // means the user opted out of `~/.groky` and we must not touch it.
+    if env_groky.is_none() && env_grok.is_none() {
+        let legacy = home_dir.join(".grok");
+        match migrate_legacy_home(&legacy, &resolved) {
+            Ok(true) => tracing::info!(
+                from = %legacy.display(),
+                to = %resolved.display(),
+                "migrated legacy grok home to ~/.groky (original left untouched)"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                from = %legacy.display(),
+                to = %resolved.display(),
+                %error,
+                "failed to migrate legacy grok home; continuing with a fresh ~/.groky"
+            ),
+        }
+    }
+    let _ = std::fs::create_dir_all(&resolved);
+    resolved
+}
+
+/// Per-user config directory: `$GROKY_HOME`, `$GROK_HOME` (legacy), or
+/// `~/.groky`. Created if needed. On first default-path resolution, a legacy
+/// `~/.grok` tree is copied to `~/.groky` (one-time migration; the legacy
+/// tree is never modified).
 pub fn grok_home() -> PathBuf {
     GROK_HOME
         .get_or_init(|| {
-            let grok_home = if let Ok(v) = std::env::var("GROK_HOME") {
-                PathBuf::from(v)
-            } else {
-                default_grok_home()
-            };
-            let _ = std::fs::create_dir_all(&grok_home);
-            grok_home
+            let groky = std::env::var("GROKY_HOME").ok();
+            let grok = std::env::var("GROK_HOME").ok();
+            init_grok_home_with(groky.as_deref(), grok.as_deref(), &canonical_user_home())
         })
         .clone()
 }
 
 /// The user-global grok home, but only when one genuinely resolves: `Some` when
-/// `$GROK_HOME` is set or a home directory is found, `None` otherwise. Unlike
-/// [`grok_home()`], this never falls back to a cwd-relative `.grok`, so callers
-/// that *scan* user-global grok resources (hooks, marketplace sources, ...) don't
-/// mistake a project's `.grok` tree for the user-global one when no home resolves.
+/// `$GROKY_HOME`/`$GROK_HOME` is set or a home directory is found, `None`
+/// otherwise. Unlike [`grok_home()`], this never falls back to a cwd-relative
+/// `.groky`, so callers that *scan* user-global grok resources (hooks,
+/// marketplace sources, ...) don't mistake a project's tree for the
+/// user-global one when no home resolves.
 pub fn user_grok_home() -> Option<PathBuf> {
     #[allow(deprecated)]
-    let resolvable = std::env::var_os("GROK_HOME").is_some() || std::env::home_dir().is_some();
+    let resolvable = std::env::var_os("GROKY_HOME").is_some()
+        || std::env::var_os("GROK_HOME").is_some()
+        || std::env::home_dir().is_some();
     resolvable.then(grok_home)
 }
 
@@ -312,7 +450,7 @@ mod tests {
         // canonicalization must yield a plain path. No-op assertion on Unix.
         let home = default_grok_home();
         assert!(!home.to_string_lossy().starts_with(r"\\?\"));
-        assert!(home.ends_with(".grok"));
+        assert!(home.ends_with(".groky"));
     }
 
     #[test]
