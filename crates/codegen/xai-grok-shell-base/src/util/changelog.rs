@@ -70,11 +70,13 @@ impl ChangelogManager {
     }
 
     /// Resolve cache paths from the live process environment (not the
-    /// `grok_home()` OnceLock). A seeded `$GROK_HOME` set on the pager
-    /// process is always honoured even if some earlier init path cached a
-    /// different home.
+    /// `grok_home()` OnceLock). A seeded `$GROKY_HOME`/`$GROK_HOME` set on the
+    /// pager process is always honoured even if some earlier init path cached
+    /// a different home.
     fn from_env_home() -> Self {
-        let home = std::env::var_os("GROK_HOME")
+        let home = std::env::var_os("GROKY_HOME")
+            .filter(|p| !p.is_empty())
+            .or_else(|| std::env::var_os("GROK_HOME"))
             .map(std::path::PathBuf::from)
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(crate::util::grok_home::grok_home);

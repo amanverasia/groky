@@ -338,15 +338,21 @@ pub fn now_epoch_secs() -> i64 {
 }
 
 pub fn resolve_grok_home() -> Result<PathBuf> {
+    if let Ok(v) = std::env::var("GROKY_HOME") {
+        return Ok(PathBuf::from(v));
+    }
+    // Legacy env var, honoured for backwards compatibility.
     if let Ok(v) = std::env::var("GROK_HOME") {
         return Ok(PathBuf::from(v));
     }
-    let home = PathBuf::from(std::env::var("HOME").context("neither $GROK_HOME nor $HOME is set")?);
-    // Canonicalize the home dir so worktree paths share the same physical .grok
+    let home = PathBuf::from(
+        std::env::var("HOME").context("neither $GROKY_HOME, $GROK_HOME nor $HOME is set")?,
+    );
+    // Canonicalize the home dir so worktree paths share the same physical .groky
     // tree as trust/hooks even when it is symlinked. The dunce canonicalization
     // must stay in sync with xai_grok_config::default_grok_home();
     // home resolution deliberately differs ($HOME here vs std::env::home_dir()).
-    Ok(dunce::canonicalize(&home).unwrap_or(home).join(".grok"))
+    Ok(dunce::canonicalize(&home).unwrap_or(home).join(".groky"))
 }
 
 /// Serializes tests that mutate the process-global `GROK_HOME` env var so they
@@ -366,6 +372,7 @@ static GROK_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub(crate) struct GrokHomeFixture {
     _lock: std::sync::MutexGuard<'static, ()>,
+    prev_groky: Option<std::ffi::OsString>,
     prev: Option<std::ffi::OsString>,
     /// The isolated grok home; pass to `WorktreeDb::open` to read the same DB
     /// `open_default()` writes to.
@@ -386,10 +393,17 @@ impl GrokHomeFixture {
         // until GROK_HOME points here); set_journal_mode's retry is the actual
         // race fix.
         let _ = WorktreeDb::open(&home);
+        let prev_groky = std::env::var_os("GROKY_HOME");
         let prev = std::env::var_os("GROK_HOME");
-        unsafe { std::env::set_var("GROK_HOME", &home) };
+        // Set both so the fixture wins regardless of which var the ambient
+        // environment has set (GROKY_HOME takes precedence over GROK_HOME).
+        unsafe {
+            std::env::set_var("GROKY_HOME", &home);
+            std::env::set_var("GROK_HOME", &home);
+        }
         Self {
             _lock: lock,
+            prev_groky,
             prev,
             home,
             _tmp: tmp,
@@ -401,6 +415,10 @@ impl GrokHomeFixture {
 impl Drop for GrokHomeFixture {
     fn drop(&mut self) {
         unsafe {
+            match self.prev_groky.take() {
+                Some(p) => std::env::set_var("GROKY_HOME", p),
+                None => std::env::remove_var("GROKY_HOME"),
+            }
             match self.prev.take() {
                 Some(p) => std::env::set_var("GROK_HOME", p),
                 None => std::env::remove_var("GROK_HOME"),

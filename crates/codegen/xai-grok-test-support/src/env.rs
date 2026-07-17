@@ -163,6 +163,9 @@ pub fn test_env_cmd_tokio(
         // its per-test mock-server URL) then poisons every later test's
         // prompt (the windows-x86_64 lifecycle "prompt timed out" failure).
         // Mirrors `leader.rs` and the pty-harness `env_for_pager`.
+        // Both GROKY_HOME (primary) and GROK_HOME (legacy) are set so spawned
+        // binaries of either vintage resolve the same sandboxed home.
+        .env("GROKY_HOME", home.join(".grok"))
         .env("GROK_HOME", home.join(".grok"))
         .env("GROK_CLI_CHAT_PROXY_BASE_URL", mock_url)
         .env("GROK_XAI_API_BASE_URL", mock_url)

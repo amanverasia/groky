@@ -135,6 +135,9 @@ impl LeaderStdioClient {
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", home)
+            // Primary + legacy home vars so spawned binaries of either
+            // vintage resolve the same sandboxed home.
+            .env("GROKY_HOME", home.join(".grok"))
             .env("GROK_HOME", home.join(".grok"))
             // Pin the socket inside the sandbox. The lock file is the
             // sibling `.lock` (leader.sock -> leader.lock), and the spawned

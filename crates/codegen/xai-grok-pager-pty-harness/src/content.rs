@@ -86,9 +86,10 @@ impl ContentController {
             .into_owned();
         vec![
             ("HOME".into(), home),
-            // Explicit GROK_HOME prevents leaking the real user's
-            // config.toml when $HOME alone isn't sufficient (e.g. if
-            // GROK_HOME is set in the test runner's env).
+            // Explicit GROKY_HOME/GROK_HOME (primary + legacy) prevents
+            // leaking the real user's config.toml when $HOME alone isn't
+            // sufficient (e.g. if either var is set in the test runner's env).
+            ("GROKY_HOME".into(), grok_home.clone()),
             ("GROK_HOME".into(), grok_home),
             ("GROK_CLI_CHAT_PROXY_BASE_URL".into(), self.url()),
             ("GROK_XAI_API_BASE_URL".into(), self.url()),
@@ -275,6 +276,10 @@ mod tests {
 
         assert_eq!(get("HOME").as_deref(), content.home().to_str());
         assert_eq!(
+            get("GROKY_HOME").as_deref(),
+            content.home().join(".grok").to_str()
+        );
+        assert_eq!(
             get("GROK_HOME").as_deref(),
             content.home().join(".grok").to_str()
         );
@@ -286,6 +291,6 @@ mod tests {
         assert_eq!(get("GROK_TRACE_UPLOAD").as_deref(), Some("false"));
         assert_eq!(get("GROK_PROMPT_SUGGESTIONS").as_deref(), Some("false"));
         assert_eq!(get("GROK_MAX_RETRIES").as_deref(), Some("0"));
-        assert_eq!(env.len(), 10, "env list must not silently grow or shrink");
+        assert_eq!(env.len(), 11, "env list must not silently grow or shrink");
     }
 }
