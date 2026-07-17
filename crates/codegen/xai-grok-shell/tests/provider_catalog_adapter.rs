@@ -154,14 +154,18 @@ fn adapter_rejects_unsupported_protocol() {
     assert!(model_entry_from_catalog(&sample_provider(), &model).is_err());
 }
 
+/// `unauthenticated` means a key is optional, not forbidden: entries stay on
+/// the ProviderApiKey seam (which resolves to no header when no key exists)
+/// so a stored key — e.g. from Janus setup — authenticates inference exactly
+/// like it authenticates health/discovery.
 #[test]
-fn adapter_maps_unauthenticated_provider_to_none_policy() {
+fn adapter_keeps_provider_key_seam_for_unauthenticated_provider() {
     let provider = CatalogProvider {
         unauthenticated: true,
         ..sample_provider()
     };
     let entry = model_entry_from_catalog(&provider, &sample_model()).unwrap();
-    assert_eq!(entry.credential_policy, CredentialPolicy::None);
+    assert_eq!(entry.credential_policy, CredentialPolicy::ProviderApiKey);
 }
 
 #[test]

@@ -129,3 +129,118 @@ impl std::fmt::Debug for SecretKey {
         f.write_str("SecretKey(\u{ab}redacted\u{bb})")
     }
 }
+
+// ── Janus local-provider setup (x.ai/providers/setup_janus) ─────────
+
+/// Default Janus base URL prefilled in the setup flow.
+pub const JANUS_DEFAULT_BASE_URL: &str = "http://127.0.0.1:20128/v1";
+
+/// Warning shown before accepting a plain-HTTP, non-loopback base URL.
+pub const JANUS_INSECURE_URL_WARNING: &str = "This URL sends prompts and credentials over \
+     plain HTTP. Continue only if you trust this network.";
+
+/// Outcome state of `x.ai/providers/setup_janus`, matching the shell's
+/// lowercase `"ready"`/`"empty"`/`"failed"` wire strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JanusSetupState {
+    Ready,
+    Empty,
+    Failed,
+}
+
+/// Response of `x.ai/providers/setup_janus`. Secret-free.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JanusSetupResponse {
+    pub state: JanusSetupState,
+    /// Models published when `state == Ready`.
+    pub model_count: usize,
+    /// Last-known-good models still served when `state == Failed`.
+    pub cached_models: usize,
+    /// Concise, secret-free message for non-ready states.
+    pub message: Option<String>,
+}
+
+/// Parameters of the `SetupJanus` effect. `Debug` is manual and prints
+/// only `has_api_key` so the key can never leak through formatting.
+#[derive(Clone)]
+pub struct JanusSetupParams {
+    pub base_url: String,
+    /// Optional key; `None` leaves any stored key unchanged.
+    pub api_key: Option<SecretKey>,
+    pub allow_insecure_http: bool,
+}
+
+impl std::fmt::Debug for JanusSetupParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JanusSetupParams")
+            .field("base_url", &self.base_url)
+            .field("has_api_key", &self.api_key.is_some())
+            .field("allow_insecure_http", &self.allow_insecure_http)
+            .finish()
+    }
+}
+
+/// User-facing result line for a completed Janus setup, with exact copy:
+/// - Ready:  `Janus is ready. {count} models available.`
+/// - Empty:  `Janus is healthy but returned no models.`
+/// - Failed: `{message}`, plus ` {count} cached models remain available.`
+///   only when cached models exist.
+pub fn janus_result_message(resp: &JanusSetupResponse) -> String {
+    match resp.state {
+        JanusSetupState::Ready => {
+            format!("Janus is ready. {} models available.", resp.model_count)
+        }
+        JanusSetupState::Empty => "Janus is healthy but returned no models.".to_string(),
+        JanusSetupState::Failed => {
+            let message = resp
+                .message
+                .clone()
+                .unwrap_or_else(|| "Janus setup failed.".to_string());
+            if resp.cached_models > 0 {
+                format!(
+                    "{message} {} cached models remain available.",
+                    resp.cached_models
+                )
+            } else {
+                message
+            }
+        }
+    }
+}
+
+/// True when `url` is plain `http://` to a non-loopback host (anything
+/// other than `127.0.0.1`, `[::1]`, or `localhost`). Such URLs send
+/// prompts and credentials in cleartext and require explicit confirmation.
+pub fn is_insecure_non_loopback_http(url: &str) -> bool {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("http://") else {
+        return false; // https:// (or anything else) is not plain HTTP.
+    };
+    // Authority = up to the first '/'; drop any userinfo before '@'.
+    let authority = rest.split('/').next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    !matches!(host, "127.0.0.1" | "::1" | "localhost")
+}
+
+/// Ensure a selectable Janus setup row is present. The shell's provider
+/// list only includes `janus` once the preset has been registered, so an
+/// unconfigured install would otherwise have no way to start setup.
+pub fn ensure_janus_row(rows: &mut Vec<ProviderRowView>) {
+    if rows.iter().any(|r| r.provider_id == "janus") {
+        return;
+    }
+    rows.push(ProviderRowView {
+        provider_id: "janus".to_string(),
+        provider_name: "Janus (local)".to_string(),
+        status: ProviderStatus::MissingKey,
+        disabled: false,
+    });
+}

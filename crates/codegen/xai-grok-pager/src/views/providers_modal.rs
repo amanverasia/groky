@@ -13,7 +13,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::app::actions::Action;
-use crate::providers::{ProviderListResponse, ProviderRowView, ProviderStatus, SecretKey};
+use crate::providers::{
+    JANUS_DEFAULT_BASE_URL, JANUS_INSECURE_URL_WARNING, JanusSetupParams, JanusSetupResponse,
+    ProviderListResponse, ProviderRowView, ProviderStatus, SecretKey,
+    is_insecure_non_loopback_http, janus_result_message,
+};
 use crate::theme::Theme;
 use crate::views::modal_window::{
     self as mw, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
@@ -33,6 +37,28 @@ pub enum ProvidersMode {
         /// True when replacing an existing key (display only).
         replace: bool,
     },
+    /// Janus setup step 1: editable base URL. When the URL is plain HTTP
+    /// to a non-loopback host, `insecure_confirmation_required` gates
+    /// progress behind an explicit second Enter.
+    JanusBaseUrl {
+        value: String,
+        insecure_confirmation_required: bool,
+    },
+    /// Janus setup step 2: optional API key. The buffer holds plaintext
+    /// and must never be formatted; `Debug` below redacts it.
+    JanusApiKey {
+        base_url: String,
+        allow_insecure_http: bool,
+        /// Plaintext key buffer — rendered masked, cleared on submit.
+        buffer: String,
+    },
+    /// Janus setup step 3: health probe in flight.
+    JanusChecking { base_url: String },
+    /// Janus setup finished; shows the outcome message.
+    JanusResult {
+        message: String,
+        cached_models: usize,
+    },
 }
 
 impl std::fmt::Debug for ProvidersMode {
@@ -48,6 +74,39 @@ impl std::fmt::Debug for ProvidersMode {
                 .field("provider_id", provider_id)
                 .field("replace", replace)
                 .field("buffer", &"\u{ab}redacted\u{bb}")
+                .finish(),
+            Self::JanusBaseUrl {
+                value,
+                insecure_confirmation_required,
+            } => f
+                .debug_struct("JanusBaseUrl")
+                .field("value", value)
+                .field(
+                    "insecure_confirmation_required",
+                    insecure_confirmation_required,
+                )
+                .finish(),
+            Self::JanusApiKey {
+                base_url,
+                allow_insecure_http,
+                ..
+            } => f
+                .debug_struct("JanusApiKey")
+                .field("base_url", base_url)
+                .field("allow_insecure_http", allow_insecure_http)
+                .field("buffer", &"\u{ab}redacted\u{bb}")
+                .finish(),
+            Self::JanusChecking { base_url } => f
+                .debug_struct("JanusChecking")
+                .field("base_url", base_url)
+                .finish(),
+            Self::JanusResult {
+                message,
+                cached_models,
+            } => f
+                .debug_struct("JanusResult")
+                .field("message", message)
+                .field("cached_models", cached_models)
                 .finish(),
         }
     }
@@ -106,18 +165,26 @@ impl ProvidersModalState {
         state
     }
 
-    /// Append text to the key buffer (typing or paste). No-op in list mode.
+    /// Append text to the focused text input (typing or paste): the key
+    /// buffers or the Janus base URL. No-op elsewhere.
     pub fn insert_str(&mut self, s: &str) {
-        if let ProvidersMode::EnteringKey { buffer, .. } = &mut self.mode {
-            buffer.push_str(s);
+        match &mut self.mode {
+            ProvidersMode::EnteringKey { buffer, .. }
+            | ProvidersMode::JanusApiKey { buffer, .. } => buffer.push_str(s),
+            ProvidersMode::JanusBaseUrl {
+                value,
+                insecure_confirmation_required,
+            } if !*insecure_confirmation_required => value.push_str(s),
+            _ => {}
         }
     }
 
     /// Masked rendering of the key buffer: one `*` per character.
     pub fn rendered_key(&self) -> String {
         match &self.mode {
-            ProvidersMode::EnteringKey { buffer, .. } => "*".repeat(buffer.chars().count()),
-            ProvidersMode::List => String::new(),
+            ProvidersMode::EnteringKey { buffer, .. }
+            | ProvidersMode::JanusApiKey { buffer, .. } => "*".repeat(buffer.chars().count()),
+            _ => String::new(),
         }
     }
 
@@ -148,7 +215,9 @@ impl ProvidersModalState {
         self.loading = false;
         match result {
             Ok(list) => {
-                self.rows = crate::providers::provider_rows(&list);
+                let mut rows = crate::providers::provider_rows(&list);
+                crate::providers::ensure_janus_row(&mut rows);
+                self.rows = rows;
                 self.refresh_status = list.refresh_status;
                 self.error = None;
                 self.clamp_selection();
@@ -158,10 +227,34 @@ impl ProvidersModalState {
     }
 
     /// Apply a `x.ai/providers/update` broadcast (replacement rows).
-    pub fn apply_update(&mut self, rows: Vec<ProviderRowView>) {
+    pub fn apply_update(&mut self, mut rows: Vec<ProviderRowView>) {
         self.loading = false;
+        crate::providers::ensure_janus_row(&mut rows);
         self.rows = rows;
         self.clamp_selection();
+    }
+
+    /// Apply the `x.ai/providers/setup_janus` task result: swap the
+    /// checking spinner for the outcome message. Errors (transport or
+    /// shell-side) render like a failure with no cached models. A late
+    /// result that arrives when the modal is no longer in the checking
+    /// state (user closed/reopened it, started key entry, …) is ignored
+    /// so it cannot hijack an unrelated screen.
+    pub fn apply_janus_setup(&mut self, result: Result<JanusSetupResponse, String>) {
+        if !matches!(self.mode, ProvidersMode::JanusChecking { .. }) {
+            return;
+        }
+        let (message, cached_models) = match result {
+            Ok(resp) => {
+                let cached = resp.cached_models;
+                (janus_result_message(&resp), cached)
+            }
+            Err(e) => (e, 0),
+        };
+        self.mode = ProvidersMode::JanusResult {
+            message,
+            cached_models,
+        };
     }
 
     /// Update one row's status after a store/clear result.
@@ -199,8 +292,47 @@ impl ProvidersModalState {
     }
 }
 
+/// Complete key routing for the providers modal, exactly as
+/// `AgentView::handle_modal_key` drives it: modes that own every key
+/// (text entry, and the Janus result screen whose Enter/Esc return to the
+/// list) bypass the window chrome; all other modes let chrome handle
+/// close (Esc / close button) first, then fall through to
+/// [`handle_providers_key`].
+///
+/// `JanusChecking` deliberately stays on the chrome path: Esc during a
+/// hung health probe closes the modal as an escape hatch, and a late
+/// result is then discarded by [`ProvidersModalState::apply_janus_setup`].
+pub fn route_providers_modal_key(
+    state: &mut ProvidersModalState,
+    key: &KeyEvent,
+) -> ProvidersOutcome {
+    let owns_all_keys = matches!(
+        state.mode,
+        ProvidersMode::EnteringKey { .. }
+            | ProvidersMode::JanusBaseUrl { .. }
+            | ProvidersMode::JanusApiKey { .. }
+            | ProvidersMode::JanusResult { .. }
+    );
+    if !owns_all_keys {
+        let chrome_cfg = ModalWindowConfig {
+            title: "",
+            tabs: None,
+            shortcuts: &[],
+            sizing: ModalSizing::default(),
+            fold_info: None,
+        };
+        if matches!(
+            mw::handle_modal_key(&mut state.window, key, &chrome_cfg),
+            mw::ModalWindowOutcome::CloseRequested
+        ) {
+            return ProvidersOutcome::Close;
+        }
+    }
+    handle_providers_key(state, key)
+}
+
 /// Keyboard handling for the providers modal (chrome Esc/close is routed
-/// by the caller first; this sees everything else).
+/// by [`route_providers_modal_key`] first; this sees everything else).
 pub fn handle_providers_key(state: &mut ProvidersModalState, key: &KeyEvent) -> ProvidersOutcome {
     match &mut state.mode {
         ProvidersMode::EnteringKey { buffer, .. } => match key.code {
@@ -226,6 +358,115 @@ pub fn handle_providers_key(state: &mut ProvidersModalState, key: &KeyEvent) -> 
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 buffer.push(c);
+                ProvidersOutcome::Changed
+            }
+            _ => ProvidersOutcome::Unchanged,
+        },
+        ProvidersMode::JanusBaseUrl {
+            value,
+            insecure_confirmation_required,
+        } => match key.code {
+            KeyCode::Esc => {
+                if *insecure_confirmation_required {
+                    // Back out of the confirmation to keep editing.
+                    *insecure_confirmation_required = false;
+                } else {
+                    state.mode = ProvidersMode::List;
+                }
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Enter => {
+                let url = value.trim().to_string();
+                if url.is_empty() {
+                    return ProvidersOutcome::Unchanged;
+                }
+                let insecure = is_insecure_non_loopback_http(&url);
+                if insecure && !*insecure_confirmation_required {
+                    // First Enter on an insecure URL only reveals the
+                    // confirmation; nothing is sent anywhere.
+                    *insecure_confirmation_required = true;
+                    return ProvidersOutcome::Changed;
+                }
+                // Loopback/https, or ConfirmInsecureProviderUrl (second
+                // Enter): proceed to the optional key screen.
+                state.mode = ProvidersMode::JanusApiKey {
+                    base_url: url,
+                    allow_insecure_http: insecure,
+                    buffer: String::new(),
+                };
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Backspace if !*insecure_confirmation_required => {
+                value.pop();
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Char('u')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !*insecure_confirmation_required =>
+            {
+                value.clear();
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !*insecure_confirmation_required =>
+            {
+                value.push(c);
+                ProvidersOutcome::Changed
+            }
+            _ => ProvidersOutcome::Unchanged,
+        },
+        ProvidersMode::JanusApiKey {
+            base_url,
+            allow_insecure_http,
+            buffer,
+        } => match key.code {
+            KeyCode::Esc => {
+                buffer.clear();
+                let value = base_url.clone();
+                state.mode = ProvidersMode::JanusBaseUrl {
+                    value,
+                    insecure_confirmation_required: false,
+                };
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Enter => {
+                // Move the plaintext out of the widget immediately; an
+                // empty/blank key means "leave any stored key unchanged".
+                let raw = std::mem::take(buffer);
+                let api_key = if raw.trim().is_empty() {
+                    None
+                } else {
+                    Some(SecretKey::new(raw))
+                };
+                let params = JanusSetupParams {
+                    base_url: base_url.clone(),
+                    api_key,
+                    allow_insecure_http: *allow_insecure_http,
+                };
+                state.mode = ProvidersMode::JanusChecking {
+                    base_url: params.base_url.clone(),
+                };
+                ProvidersOutcome::Action(Action::SetupJanus(params))
+            }
+            KeyCode::Backspace => {
+                buffer.pop();
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                buffer.clear();
+                ProvidersOutcome::Changed
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                buffer.push(c);
+                ProvidersOutcome::Changed
+            }
+            _ => ProvidersOutcome::Unchanged,
+        },
+        ProvidersMode::JanusChecking { .. } => ProvidersOutcome::Unchanged,
+        ProvidersMode::JanusResult { .. } => match key.code {
+            KeyCode::Enter | KeyCode::Esc => {
+                state.mode = ProvidersMode::List;
                 ProvidersOutcome::Changed
             }
             _ => ProvidersOutcome::Unchanged,
@@ -257,6 +498,15 @@ pub fn handle_providers_key(state: &mut ProvidersModalState, key: &KeyEvent) -> 
                     // xAI stays on the dedicated OAuth/default login flow.
                     return ProvidersOutcome::CloseWithAction(Action::Login);
                 }
+                if row.provider_id == "janus" {
+                    // Janus is configured by URL + optional key, not a
+                    // bare key: enter the guided setup flow.
+                    state.mode = ProvidersMode::JanusBaseUrl {
+                        value: JANUS_DEFAULT_BASE_URL.to_string(),
+                        insecure_confirmation_required: false,
+                    };
+                    return ProvidersOutcome::Changed;
+                }
                 let replace = row.status != ProviderStatus::MissingKey;
                 state.mode = ProvidersMode::EnteringKey {
                     provider_id: row.provider_id.clone(),
@@ -278,7 +528,9 @@ pub fn handle_providers_key(state: &mut ProvidersModalState, key: &KeyEvent) -> 
                     ProvidersOutcome::Unchanged
                 }
             }
-            KeyCode::Char('r') => ProvidersOutcome::Action(Action::RefreshProviders),
+            KeyCode::Char('r') => {
+                ProvidersOutcome::Action(Action::RefreshProviders { force: true })
+            }
             _ => ProvidersOutcome::Unchanged,
         },
     }
@@ -291,6 +543,26 @@ fn status_color(theme: &Theme, status: ProviderStatus) -> ratatui::style::Color 
         ProviderStatus::MissingKey => theme.warning,
         ProviderStatus::Unavailable => theme.gray_dim,
     }
+}
+
+/// Greedy word-wrap for plain notice text (warning/result lines).
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn refresh_status_label(raw: &str) -> Option<String> {
@@ -310,7 +582,12 @@ pub fn render_providers_overlay(
     compact: bool,
     theme: &Theme,
 ) {
-    let entering = matches!(state.mode, ProvidersMode::EnteringKey { .. });
+    let entering = matches!(
+        state.mode,
+        ProvidersMode::EnteringKey { .. }
+            | ProvidersMode::JanusBaseUrl { .. }
+            | ProvidersMode::JanusApiKey { .. }
+    );
     let shortcuts: Vec<Shortcut> = if entering {
         vec![
             Shortcut {
@@ -418,6 +695,139 @@ pub fn render_providers_overlay(
                         "The key is stored locally and never displayed.",
                         dim,
                     )),
+                    content.width,
+                );
+            }
+        }
+        ProvidersMode::JanusBaseUrl {
+            value,
+            insecure_confirmation_required,
+        } => {
+            if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled(
+                        "Set up Janus (local): base URL",
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    content.width,
+                );
+            }
+            y += 2;
+            if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled(
+                        value.clone(),
+                        Style::default().fg(theme.text_primary),
+                    )),
+                    content.width,
+                );
+            }
+            y += 2;
+            if *insecure_confirmation_required {
+                for chunk in wrap_plain(JANUS_INSECURE_URL_WARNING, content.width as usize) {
+                    if y >= max_y {
+                        break;
+                    }
+                    buf.set_line(
+                        content.x,
+                        y,
+                        &Line::from(Span::styled(chunk, Style::default().fg(theme.warning))),
+                        content.width,
+                    );
+                    y += 1;
+                }
+                if y < max_y {
+                    buf.set_line(
+                        content.x,
+                        y,
+                        &Line::from(Span::styled("Enter continue \u{2022} Esc edit URL", dim)),
+                        content.width,
+                    );
+                }
+            } else if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled(
+                        "Enter to continue \u{2022} Esc to go back",
+                        dim,
+                    )),
+                    content.width,
+                );
+            }
+        }
+        ProvidersMode::JanusApiKey { .. } => {
+            if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled(
+                        "Optional API key for Janus",
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    content.width,
+                );
+            }
+            y += 2;
+            if y < max_y {
+                let masked = state.rendered_key();
+                let shown = if masked.is_empty() {
+                    Span::styled("(leave blank to skip)", dim)
+                } else {
+                    Span::styled(masked, Style::default().fg(theme.text_primary))
+                };
+                buf.set_line(content.x, y, &Line::from(shown), content.width);
+            }
+            y += 2;
+            if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled("optional, starts with sk-janus-", dim)),
+                    content.width,
+                );
+            }
+        }
+        ProvidersMode::JanusChecking { base_url } => {
+            if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled(
+                        format!("Checking Janus health at {base_url}"),
+                        Style::default().fg(theme.text_primary),
+                    )),
+                    content.width,
+                );
+            }
+        }
+        ProvidersMode::JanusResult { message, .. } => {
+            for chunk in wrap_plain(message, content.width as usize) {
+                if y >= max_y {
+                    break;
+                }
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled(chunk, Style::default().fg(theme.text_primary))),
+                    content.width,
+                );
+                y += 1;
+            }
+            y += 1;
+            if y < max_y {
+                buf.set_line(
+                    content.x,
+                    y,
+                    &Line::from(Span::styled("Enter/Esc back to providers", dim)),
                     content.width,
                 );
             }

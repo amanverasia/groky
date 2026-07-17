@@ -45,7 +45,7 @@ pub enum AuthScheme {
 /// `SamplerConfig` is handed to the actor. Auth is selected separately
 /// via `auth_scheme`, while `api_backend` controls only the request/response
 /// protocol shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
     pub api_key: Option<String>,
     pub base_url: String,
@@ -124,6 +124,50 @@ pub struct SamplerConfig {
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
+}
+
+/// Manual `Debug` so the configured credential can never leak through
+/// debug renderings (logs, `{:?}` in errors, snapshots). Secrets are
+/// reduced to boolean presence flags; `extra_headers` values may carry
+/// proxy credentials, so only the header *names* are printed.
+impl std::fmt::Debug for SamplerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SamplerConfig")
+            .field("has_api_key", &self.api_key.is_some())
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("max_completion_tokens", &self.max_completion_tokens)
+            .field("temperature", &self.temperature)
+            .field("top_p", &self.top_p)
+            .field("api_backend", &self.api_backend)
+            .field("auth_scheme", &self.auth_scheme)
+            .field(
+                "extra_header_names",
+                &self.extra_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("context_window", &self.context_window)
+            .field("force_http1", &self.force_http1)
+            .field("max_retries", &self.max_retries)
+            .field("stream_tool_calls", &self.stream_tool_calls)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("origin_client", &self.origin_client)
+            .field("client_identifier", &self.client_identifier)
+            .field("deployment_id", &self.deployment_id)
+            .field("has_user_id", &self.user_id.is_some())
+            .field("client_version", &self.client_version)
+            .field(
+                "has_attribution_callback",
+                &self.attribution_callback.is_some(),
+            )
+            .field("has_bearer_resolver", &self.bearer_resolver.is_some())
+            .field("supports_backend_search", &self.supports_backend_search)
+            .field("compactions_remaining", &self.compactions_remaining)
+            .field("compaction_at_tokens", &self.compaction_at_tokens)
+            .field("doom_loop_recovery", &self.doom_loop_recovery)
+            .field("has_header_injector", &self.header_injector.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for SamplerConfig {

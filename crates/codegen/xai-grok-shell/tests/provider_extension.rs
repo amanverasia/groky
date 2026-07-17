@@ -8,11 +8,12 @@
 
 use std::sync::Arc;
 
+use agent_client_protocol as acp;
 use serial_test::serial;
 use xai_acp_lib::{AcpAgentGatewaySender, AcpClientMessage};
 use xai_grok_catalog::{
     CATALOG_SCHEMA_VERSION, CatalogCache, CatalogManager, CatalogModel, CatalogProvider, ModelId,
-    NormalizedCatalog, Protocol, ProviderAvailability, ProviderId, encode_cache,
+    NormalizedCatalog, Protocol, ProviderAvailability, ProviderId, RefreshOutcome, encode_cache,
 };
 use xai_grok_shell::agent::config::Config;
 use xai_grok_shell::agent::models::ModelsManager;
@@ -21,8 +22,9 @@ use xai_grok_shell::agent::provider_catalog::{
 };
 use xai_grok_shell::auth::{AuthManager, GrokComConfig};
 use xai_grok_shell::extensions::providers::{
-    ClearProviderKeyRequest, ProviderSurface, StoreProviderKeyRequest, clear_provider_key,
-    list_providers, refresh_providers, store_provider_key,
+    ClearProviderKeyRequest, ProviderSurface, RefreshRequest, StoreProviderKeyRequest,
+    clear_provider_key, list_providers, parse_refresh_request, refresh_providers,
+    store_provider_key,
 };
 
 fn model(id: &str, name: &str) -> CatalogModel {
@@ -362,6 +364,118 @@ async fn opening_surface_returns_immediately_and_starts_one_stale_refresh() {
     assert_eq!(second.refresh_status, "refreshing");
 
     // Explicit refresh also coalesces while one is in flight.
-    let explicit = refresh_providers(&surface);
+    let explicit = refresh_providers(&surface, RefreshRequest { force: true });
     assert!(!explicit.started);
+}
+
+/// Non-forced (picker-open) refresh defers staleness entirely to the catalog
+/// manager: the request claims the coalescing slot, but with a fresh cache
+/// the background task's `refresh_if_stale` performs no network fetch. This
+/// must hold even though the snapshot's `RefreshStatus` is frozen at load
+/// time (it never decays Fresh→Stale in a long-lived process), so the
+/// handler must NOT gate on the snapshot status itself.
+#[tokio::test]
+#[serial(provider_env)]
+async fn refresh_respects_staleness_gate_unless_forced() {
+    clear_provider_env();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    // Fresh cache pointed at an unreachable origin: any real fetch would
+    // error ("connection failed"), so an Ok(Fresh) outcome proves no
+    // network I/O happened.
+    let source_url = "http://127.0.0.1:9/api.json";
+    write_cache(tmp.path(), source_url, chrono::Utc::now());
+    let manager = CatalogManager::new(
+        tmp.path().join(PROVIDER_CATALOG_CACHE_FILE),
+        source_url.to_string(),
+    );
+    let adapter = Arc::new(ProviderCatalogAdapter::new(
+        manager,
+        tmp.path().to_path_buf(),
+    ));
+    let surface = surface(tmp.path(), Arc::clone(&adapter), false);
+
+    // Non-forced must still start (the manager, not the frozen snapshot
+    // status, is the staleness authority)...
+    let gated = refresh_providers(&surface, RefreshRequest { force: false });
+    assert!(
+        gated.started,
+        "non-forced refresh must spawn; staleness is decided by the manager"
+    );
+    // ...and the spawned task must complete without wedging the slot.
+    for _ in 0..100 {
+        if !adapter.refresh_in_flight() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !adapter.refresh_in_flight(),
+        "refresh slot must be released"
+    );
+    // The manager-side gate is what the non-forced task runs: with a fresh
+    // cache it returns Fresh without touching the (unreachable) network.
+    assert!(matches!(
+        adapter.refresh_if_stale().await.unwrap(),
+        RefreshOutcome::Fresh
+    ));
+
+    let forced = refresh_providers(&surface, RefreshRequest { force: true });
+    assert!(forced.started, "explicit refresh must run unconditionally");
+}
+
+/// ACP clients may omit params entirely (`params: null`); the refresh
+/// handler must treat that as the default, non-forced request rather than
+/// failing with invalid_params.
+#[test]
+fn refresh_accepts_null_params_as_non_forced() {
+    let null_params = serde_json::value::to_raw_value(&serde_json::Value::Null).unwrap();
+    let args = acp::ExtRequest::new("x.ai/providers/refresh", null_params.into());
+    let req = parse_refresh_request(&args).expect("null params must be accepted");
+    assert!(!req.force);
+
+    let empty = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
+    let args = acp::ExtRequest::new("x.ai/providers/refresh", empty.into());
+    assert!(!parse_refresh_request(&args).unwrap().force);
+
+    let forced = serde_json::value::to_raw_value(&serde_json::json!({ "force": true })).unwrap();
+    let args = acp::ExtRequest::new("x.ai/providers/refresh", forced.into());
+    assert!(parse_refresh_request(&args).unwrap().force);
+}
+
+/// Wire backward compatibility: old clients send `{}`, which must parse as
+/// a non-forced (staleness-gated) refresh.
+#[test]
+fn refresh_request_defaults_to_non_forced() {
+    let req: RefreshRequest = serde_json::from_str("{}").unwrap();
+    assert!(!req.force);
+    let req: RefreshRequest = serde_json::from_str(r#"{"force":true}"#).unwrap();
+    assert!(req.force);
+}
+
+/// A stale cache must still allow a non-forced (picker-open) refresh.
+#[tokio::test]
+#[serial(provider_env)]
+async fn stale_cache_allows_non_forced_refresh() {
+    clear_provider_env();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("GROK_HOME", tmp.path()) };
+    let source_url = "http://127.0.0.1:9/api.json";
+    write_cache(
+        tmp.path(),
+        source_url,
+        chrono::Utc::now() - chrono::Duration::days(7),
+    );
+    let manager = CatalogManager::new(
+        tmp.path().join(PROVIDER_CATALOG_CACHE_FILE),
+        source_url.to_string(),
+    );
+    let adapter = Arc::new(ProviderCatalogAdapter::new(
+        manager,
+        tmp.path().to_path_buf(),
+    ));
+    let surface = surface(tmp.path(), adapter, false);
+
+    let gated = refresh_providers(&surface, RefreshRequest { force: false });
+    assert!(gated.started, "stale cache: picker-open refresh must start");
 }

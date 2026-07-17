@@ -27,7 +27,8 @@ pub fn request_span(
         api_backend = api_backend,
         base_url = base_url,
         auth_type = auth.auth_type,
-        auth_prefix = auth.auth_prefix.as_deref().unwrap_or(""),
+        // Never log the credential prefix itself; boolean presence only.
+        has_auth = auth.auth_prefix.is_some(),
         // Recorded from `SamplerConfig` / response usage as the request
         // progresses; `field::Empty` lets callers `record()` them later.
         reasoning_effort = tracing::field::Empty,

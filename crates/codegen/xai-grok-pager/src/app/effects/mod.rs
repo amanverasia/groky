@@ -2114,11 +2114,11 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RefreshProviders => {
+        Effect::RefreshProviders { force } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({});
+                    let params = serde_json::json!({ "force" : force });
                     let req = acp::ExtRequest::new(
                         "x.ai/providers/refresh",
                         serde_json::value::to_raw_value(&params)
@@ -2148,6 +2148,54 @@ pub(crate) fn execute(
                         }
                     };
                     TaskResult::ProvidersRefreshRequested {
+                        result,
+                    }
+                });
+        }
+        Effect::SetupJanus(params) => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let crate::providers::JanusSetupParams {
+                        base_url,
+                        api_key,
+                        allow_insecure_http,
+                    } = params;
+                    // Raw JSON with the (optional) key is constructed only
+                    // here, at execution time, and dropped with the request.
+                    let json_params = serde_json::json!(
+                        { "baseUrl" : & base_url, "apiKey" : api_key.as_ref().map(| k | k
+                        .expose()), "allowInsecureHttp" : allow_insecure_http, }
+                    );
+                    let req = acp::ExtRequest::new(
+                        "x.ai/providers/setup_janus",
+                        serde_json::value::to_raw_value(&json_params)
+                            .expect("serialize providers/setup_janus params")
+                            .into(),
+                    );
+                    drop(json_params);
+                    drop(api_key);
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let inner = wrapper.get("result").unwrap_or(&wrapper);
+                            serde_json::from_value::<
+                                crate::providers::JanusSetupResponse,
+                            >(inner.clone())
+                                .map_err(|_| "couldn't set up Janus".to_string())
+                        }
+                        Err(e) => {
+                            Err(
+                                sanitize_user_error(
+                                    &format!("couldn't set up Janus: {e}"),
+                                ),
+                            )
+                        }
+                    };
+                    TaskResult::JanusSetupComplete {
                         result,
                     }
                 });

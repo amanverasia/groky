@@ -6,7 +6,13 @@
 
 pub mod cache;
 pub mod credentials;
+pub mod discovery;
+pub mod dynamic;
+pub mod dynamic_cache;
+pub mod http;
+pub mod janus;
 pub mod layer;
+pub mod limits;
 pub mod normalize;
 pub mod refresh;
 pub mod types;
@@ -15,6 +21,21 @@ pub use cache::{CatalogCache, decode_cache, encode_cache};
 pub use credentials::{
     CredentialOrigin, CredentialSources, ProviderAvailability, ProviderStatus, ResolvedCredential,
     SecretString, classify_provider, resolve_credential,
+};
+pub use discovery::{DiscoveredModel, DiscoveryError, parse_model_list};
+pub use dynamic::{DynamicConfigError, DynamicProviderConfig, merge_dynamic_models};
+pub use dynamic_cache::{
+    CachedModel, CachedProviderModels, DYNAMIC_CACHE_SCHEMA_VERSION, DiscoveryRefreshError,
+    DynamicCache, DynamicCacheError, DynamicCacheFile, DynamicRefreshOutcome, DynamicRefreshStatus,
+};
+pub use http::{
+    BoundedResponse, HttpError, RequestKind, derive_endpoint, get_bounded, redact_userinfo,
+    validate_url,
+};
+pub use janus::{
+    JANUS_DEFAULT_BASE_URL, JANUS_DISPLAY_NAME, JANUS_HEALTH_ENDPOINT, JANUS_KEY_HINT,
+    JANUS_MODELS_ENDPOINT, JANUS_PROVIDER_ID, JanusFailure, janus_failure, janus_failure_from_http,
+    janus_preset,
 };
 pub use layer::{CatalogPatch, ModelPatch, ProviderPatch, apply_patch};
 pub use normalize::normalize_models_dev;

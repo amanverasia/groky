@@ -13,7 +13,9 @@ use xai_grok_pager::providers::{
 use xai_grok_pager::slash::command::SlashCommand;
 use xai_grok_pager::slash::commands::{builtin_commands, providers::ProvidersCommand};
 use xai_grok_pager::slash::registry::CommandRegistry;
-use xai_grok_pager::views::providers_modal::ProvidersModalState;
+use xai_grok_pager::views::providers_modal::{
+    ProvidersModalState, ProvidersOutcome, handle_providers_key,
+};
 
 fn sample_provider_state() -> ProviderListResponse {
     ProviderListResponse {
@@ -146,4 +148,22 @@ fn provider_list_response_parses_shell_wire_format() {
     assert_eq!(resp.providers[3].status, ProviderStatus::Unavailable);
     assert_eq!(resp.refresh_status, "stale");
     assert!(resp.refresh_started);
+}
+
+/// The `r` key inside `/providers` is the explicit user refresh: it must
+/// request a *forced* (unconditional) catalog refresh, unlike the
+/// staleness-gated refresh fired on picker open.
+#[test]
+fn explicit_refresh_key_requests_forced_refresh() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut modal = ProvidersModalState::loading();
+    modal.loading = false;
+    let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+    match handle_providers_key(&mut modal, &key) {
+        ProvidersOutcome::Action(Action::RefreshProviders { force }) => {
+            assert!(force, "explicit refresh must set force: true");
+        }
+        _ => panic!("expected RefreshProviders action"),
+    }
 }

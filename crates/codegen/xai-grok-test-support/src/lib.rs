@@ -38,4 +38,6 @@ pub use headless::{
     HeadlessResult, assert_headless_success, assert_no_crashes, run_headless,
     run_headless_with_cmd, stderr_tail,
 };
-pub use mock_server::{MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent};
+pub use mock_server::{
+    HealthResponse, MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent,
+};

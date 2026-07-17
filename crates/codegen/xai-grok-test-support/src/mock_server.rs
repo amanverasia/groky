@@ -6,7 +6,9 @@
 //! with byte-exact reconstruction). A per-path FIFO of [`ScriptedResponse`]s
 //! (see [`MockInferenceServer::enqueue_response`]) overrides the mode for
 //! exact status/body/SSE control. `/v1/models` and `/v1/settings` return
-//! configurable responses (settings is 404 until set). All requests are
+//! configurable responses (settings is 404 until set); `/v1/health` returns a
+//! configurable status/body (default `200 {"status":"ok"}`, see
+//! [`MockInferenceServer::set_health`]). All requests are
 //! logged — bodies and headers — for assertion in tests.
 
 use std::collections::{HashMap, VecDeque};
@@ -38,7 +40,8 @@ pub struct LogEntry {
     /// Value of the `Authorization` header, if present.
     pub authorization: Option<String>,
     /// Request headers (lowercase names, arrival order), captured on the
-    /// inference POST endpoints; the GET endpoints log an empty list.
+    /// inference POST endpoints and on `GET /v1/models` + `GET /v1/health`;
+    /// the remaining GET endpoints log an empty list.
     pub headers: Vec<(String, String)>,
 }
 
@@ -86,6 +89,24 @@ impl RequestLog {
 }
 
 type ScriptQueues = Arc<std::sync::Mutex<HashMap<String, VecDeque<ScriptedResponse>>>>;
+
+/// Response served by `GET /v1/health` (status + JSON body). Defaults to
+/// `200 {"status":"ok"}`; runtime-mutable via
+/// [`MockInferenceServer::set_health`].
+#[derive(Debug, Clone)]
+pub struct HealthResponse {
+    pub status: StatusCode,
+    pub body: Value,
+}
+
+impl Default for HealthResponse {
+    fn default() -> Self {
+        Self {
+            status: StatusCode::OK,
+            body: json!({ "status": "ok" }),
+        }
+    }
+}
 
 /// A model entry for the mock `/v1/models` endpoint.
 #[derive(Debug, Clone)]
@@ -315,6 +336,8 @@ pub struct MockInferenceServer {
     completion_gate: Arc<CompletionGate>,
     /// See [`Self::set_user_subscription_tier`].
     user_tier: Arc<std::sync::RwLock<Option<String>>>,
+    /// See [`Self::set_health`].
+    health: Arc<std::sync::RwLock<HealthResponse>>,
 }
 
 impl MockInferenceServer {
@@ -354,6 +377,7 @@ impl MockInferenceServer {
         let storage = Arc::new(StorageState::default());
         let completion_gate = Arc::new(CompletionGate::default());
         let user_tier = Arc::new(std::sync::RwLock::new(None::<String>));
+        let health = Arc::new(std::sync::RwLock::new(HealthResponse::default()));
         let app = Self::build_router(
             log.clone(),
             shared_models.clone(),
@@ -366,6 +390,7 @@ impl MockInferenceServer {
             storage.clone(),
             completion_gate.clone(),
             user_tier.clone(),
+            health.clone(),
             required_token,
         );
 
@@ -407,6 +432,7 @@ impl MockInferenceServer {
             storage,
             completion_gate,
             user_tier,
+            health,
         })
     }
 
@@ -415,6 +441,12 @@ impl MockInferenceServer {
     pub fn set_models(&self, models: Vec<MockModelEntry>) {
         let mut guard = self.models.write().unwrap();
         *guard = models.iter().map(MockModelEntry::to_json).collect();
+    }
+
+    /// Replace the `GET /v1/health` response at runtime (default:
+    /// `200 {"status":"ok"}`).
+    pub fn set_health(&self, status: StatusCode, body: Value) {
+        *self.health.write().unwrap() = HealthResponse { status, body };
     }
 
     /// Stream this fixed text from all inference endpoints instead of echoing
@@ -738,6 +770,7 @@ impl MockInferenceServer {
         storage: Arc<StorageState>,
         completion_gate: Arc<CompletionGate>,
         user_tier: Arc<std::sync::RwLock<Option<String>>>,
+        health: Arc<std::sync::RwLock<HealthResponse>>,
         required_token: Option<String>,
     ) -> Router {
         let log_cc = log.clone();
@@ -745,6 +778,8 @@ impl MockInferenceServer {
         let log_msg = log.clone();
         let token_cc = required_token.clone();
         let token_msg = required_token.clone();
+        let token_models = required_token.clone();
+        let token_health = required_token.clone();
         let token_rs = required_token;
         let mode_cc = response_mode.clone();
         let mode_rs = response_mode.clone();
@@ -994,16 +1029,58 @@ impl MockInferenceServer {
                 "/v1/models",
                 get({
                     let log = log.clone();
-                    move || {
+                    move |headers: HeaderMap| {
                         let log = log.clone();
                         let models = models.clone();
+                        let required = token_models.clone();
                         async move {
-                            log.record("GET", "/v1/models", None, None, Vec::new());
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "GET",
+                                "/v1/models",
+                                None,
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
+                            if let Some(rejection) =
+                                Self::check_auth(auth.as_deref(), required.as_deref())
+                            {
+                                return rejection;
+                            }
                             let models_json = models.read().unwrap().clone();
                             Json(json!({
                                 "object": "list",
                                 "data": models_json,
                             }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/health",
+                get({
+                    let log = log.clone();
+                    move |headers: HeaderMap| {
+                        let log = log.clone();
+                        let health = health.clone();
+                        let required = token_health.clone();
+                        async move {
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "GET",
+                                "/v1/health",
+                                None,
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
+                            if let Some(rejection) =
+                                Self::check_auth(auth.as_deref(), required.as_deref())
+                            {
+                                return rejection;
+                            }
+                            let HealthResponse { status, body } = health.read().unwrap().clone();
+                            (status, Json(body)).into_response()
                         }
                     }
                 }),
@@ -1415,6 +1492,107 @@ mod tests {
         assert_eq!(entry.header("authorization"), Some("Bearer log-me"));
         assert_eq!(entry.authorization.as_deref(), Some("Bearer log-me"));
         assert_eq!(entry.header("x-absent"), None);
+    }
+
+    #[tokio::test]
+    async fn health_and_models_capture_authorization_headers() {
+        let server = MockInferenceServer::start_with_required_auth(
+            vec![MockModelEntry::new("openai/gpt-4o")],
+            "sk-janus-test",
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/health", server.url()))
+            .bearer_auth("sk-janus-test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body, json!({ "status": "ok" }));
+
+        let resp = client
+            .get(format!("{}/models", server.url()))
+            .bearer_auth("sk-janus-test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/v1/health");
+        assert_eq!(
+            requests[0].header("authorization"),
+            Some("Bearer sk-janus-test")
+        );
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(requests[1].path, "/v1/models");
+        assert_eq!(
+            requests[1].header("authorization"),
+            Some("Bearer sk-janus-test")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_status_is_configurable() {
+        let server = MockInferenceServer::start().await.unwrap();
+        server.set_health(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "status": "starting" }),
+        );
+
+        let resp = reqwest::get(format!("{}/health", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body, json!({ "status": "starting" }));
+    }
+
+    #[tokio::test]
+    async fn health_and_models_reject_missing_or_wrong_auth() {
+        let server = MockInferenceServer::start_with_required_auth(
+            vec![MockModelEntry::new("test-model")],
+            "secret-token",
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        for path in ["health", "models"] {
+            let url = format!("{}/{path}", server.url());
+            let resp = client.get(&url).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "no auth: {path}");
+            let resp = client
+                .get(&url)
+                .bearer_auth("wrong-token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "wrong token: {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn set_models_empty_list_serves_empty_data() {
+        let server = MockInferenceServer::start().await.unwrap();
+        server.set_models(Vec::new());
+
+        let body: Value = reqwest::get(format!("{}/models", server.url()))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body, json!({ "object": "list", "data": [] }));
     }
 
     #[tokio::test]

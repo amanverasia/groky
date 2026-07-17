@@ -645,6 +645,19 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::JanusSetupComplete { result } => {
+            for agent in app.agents.values_mut() {
+                if let Some(crate::views::modal::ActiveModal::Providers { state }) =
+                    &mut agent.active_modal
+                {
+                    state.apply_janus_setup(result.clone());
+                }
+            }
+            // Availability likely changed either way (the provider is
+            // registered even when unhealthy): re-fetch the secret-free
+            // provider list. Model selection is left untouched.
+            vec![Effect::ListProviders]
+        }
         TaskResult::McpAuthTriggerDone {
             agent_id,
             server_name,

@@ -1068,7 +1068,8 @@ impl AgentView {
                         // Render immediately from current state; one coalesced
                         // background refresh keeps the provider catalog fresh
                         // without delaying (or later closing) the picker.
-                        return InputOutcome::Action(Action::RefreshProviders);
+                        // Non-forced: the shell's 24h staleness gate applies.
+                        return InputOutcome::Action(Action::RefreshProviders { force: false });
                     }
                 }
                 InputOutcome::Changed

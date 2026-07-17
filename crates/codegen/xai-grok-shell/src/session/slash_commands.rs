@@ -1311,6 +1311,28 @@ mod tests {
         ));
     }
 
+    /// `/login` is an alias of `/providers` (no standalone login command):
+    /// both must resolve to the provider-management builtin.
+    #[test]
+    fn login_alias_resolves_to_providers() {
+        for input in ["/providers", "/login"] {
+            let outcome = resolve(
+                vec![text_block(input)],
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    outcome,
+                    SlashCommandOutcome::Builtin(BuiltinAction::Providers)
+                ),
+                "{input} must resolve to the providers builtin"
+            );
+        }
+    }
+
     #[test]
     fn resolve_parses_skill_with_args() {
         let skills = vec![make_skill("commit", true)];

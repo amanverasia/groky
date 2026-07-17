@@ -198,6 +198,7 @@ flate2 = { workspace = true }
 rsa = { workspace = true }
 semver = { workspace = true }
 serial_test = { workspace = true }
+wiremock = { workspace = true }
 # Test-only builds expose `env::EnvVarGuard` and the cpu_profile test seams to
 # this crate's test targets.
 xai-grok-shell-base = { workspace = true, features = [] }

@@ -358,27 +358,12 @@ impl AgentView {
             }
         }
 
-        // Providers: key entry owns its own Esc; otherwise route chrome first.
+        // Providers: full routing (chrome first unless the mode owns all
+        // keys) lives in `route_providers_modal_key` so tests can drive
+        // the identical path.
         if let ActiveModal::Providers { state } = modal {
-            use crate::views::providers_modal::{self, ProvidersMode, ProvidersOutcome};
-            let entering = matches!(state.mode, ProvidersMode::EnteringKey { .. });
-            if !entering {
-                let chrome_cfg = mw::ModalWindowConfig {
-                    title: "",
-                    tabs: None,
-                    shortcuts: &[],
-                    sizing: mw::ModalSizing::default(),
-                    fold_info: None,
-                };
-                if matches!(
-                    mw::handle_modal_key(&mut state.window, key, &chrome_cfg),
-                    ModalWindowOutcome::CloseRequested
-                ) {
-                    self.active_modal = None;
-                    return InputOutcome::Changed;
-                }
-            }
-            return match providers_modal::handle_providers_key(state, key) {
+            use crate::views::providers_modal::{self, ProvidersOutcome};
+            return match providers_modal::route_providers_modal_key(state, key) {
                 ProvidersOutcome::Close => {
                     self.active_modal = None;
                     InputOutcome::Changed
@@ -877,9 +862,12 @@ impl AgentView {
                                         // Model picker: render from current
                                         // state now, refresh the provider
                                         // catalog in the background (one
-                                        // coalesced effect per open).
+                                        // coalesced effect per open;
+                                        // non-forced → 24h staleness gate).
                                         if matches!(trimmed.as_str(), "model" | "m") {
-                                            return InputOutcome::Action(Action::RefreshProviders);
+                                            return InputOutcome::Action(
+                                                Action::RefreshProviders { force: false },
+                                            );
                                         }
                                         return InputOutcome::Changed;
                                     }

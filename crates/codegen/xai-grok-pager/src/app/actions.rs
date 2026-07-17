@@ -612,8 +612,16 @@ pub enum Action {
     ClearProviderKey {
         provider_id: String,
     },
-    /// Start a coalesced background provider-catalog refresh.
-    RefreshProviders,
+    /// Start a coalesced background provider-catalog refresh. `force: true`
+    /// (the explicit `r` key in `/providers`) bypasses the 24h staleness
+    /// gate; picker-open refreshes use `force: false`.
+    RefreshProviders {
+        force: bool,
+    },
+    /// Submit the guided Janus setup (base URL + optional key) from the
+    /// `/providers` modal. The params' manual `Debug` prints only
+    /// `has_api_key`, never key text.
+    SetupJanus(crate::providers::JanusSetupParams),
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -1692,7 +1700,14 @@ pub enum Effect {
     /// Clear a provider's stored API key (x.ai/providers/clear_key).
     ClearProviderKey { provider_id: String },
     /// Start a coalesced provider-catalog refresh (x.ai/providers/refresh).
-    RefreshProviders,
+    /// `force: true` (explicit user refresh) skips the shell's 24h
+    /// staleness gate; picker-open refreshes send `force: false`.
+    RefreshProviders { force: bool },
+    /// Configure the Janus local provider (x.ai/providers/setup_janus).
+    /// The raw JSON request is constructed only at effect execution and
+    /// dropped with the request; the params' manual `Debug` prints only
+    /// `has_api_key`.
+    SetupJanus(crate::providers::JanusSetupParams),
     /// Trigger MCP OAuth for a server (x.ai/mcp/auth_trigger).
     McpAuthTrigger {
         agent_id: AgentId,
@@ -2362,6 +2377,10 @@ pub enum TaskResult {
     /// Provider catalog refresh requested (x.ai/providers/refresh).
     ProvidersRefreshRequested {
         result: Result<bool, String>,
+    },
+    /// Janus setup finished (x.ai/providers/setup_janus). Secret-free.
+    JanusSetupComplete {
+        result: Result<crate::providers::JanusSetupResponse, String>,
     },
     /// MCP auth trigger completed.
     McpAuthTriggerDone {
