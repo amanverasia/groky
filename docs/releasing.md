@@ -11,8 +11,11 @@ and publishes a GitHub Release.
 |---|---|
 | `ubuntu-latest` | `x86_64-unknown-linux-gnu` |
 | `ubuntu-24.04-arm` | `aarch64-unknown-linux-gnu` |
-| `macos-13` | `x86_64-apple-darwin` |
-| `macos-latest` | `aarch64-apple-darwin` |
+
+macOS targets (`x86_64-apple-darwin` on `macos-13`, `aarch64-apple-darwin` on
+`macos-latest`) are disabled in the workflow for now — the runners were
+excessively slow/hung on the first release attempt. Re-enable the commented
+matrix entries and the Darwin branch in `install.sh` once diagnosed.
 
 Artifacts: `groky-<version>-<target>.tar.gz` (contains `groky`, `LICENSE`,
 `THIRD-PARTY-NOTICES`), a `.sha256` per tarball, and a combined `SHA256SUMS`.

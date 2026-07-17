@@ -37,8 +37,11 @@ main() {
     os=$(uname -s)
     case "$os" in
         Linux) os_triple="unknown-linux-gnu" ;;
-        Darwin) os_triple="apple-darwin" ;;
-        *) die "unsupported OS: $os (groky supports Linux and macOS)" ;;
+        # macOS prebuilt binaries are not published yet (release runners
+        # disabled pending diagnosis). Fail with clear guidance rather than a
+        # confusing 404 later.
+        Darwin) die "macOS prebuilt binaries are not available yet; build from source instead (see https://github.com/amanverasia/groky#building-from-source)" ;;
+        *) die "unsupported OS: $os (groky prebuilt binaries currently support Linux)" ;;
     esac
 
     arch=$(uname -m)
