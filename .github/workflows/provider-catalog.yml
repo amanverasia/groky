@@ -13,9 +13,16 @@ on:
       - "scripts/update-provider-catalog.sh"
       - "scripts/check-provider-catalog.sh"
       - ".github/workflows/provider-catalog.yml"
+  schedule:
+    # Weekly advisory freshness check against live models.dev (Mondays 06:00 UTC).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 jobs:
+  # Deterministic: regenerates the snapshot from the committed raw document.
+  # Runs on every push/PR touching the catalog; never depends on the network.
   check:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,3 +31,13 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo test -p xai-grok-catalog
       - run: scripts/check-provider-catalog.sh
+
+  # Advisory: fetches live models.dev and fails when the committed snapshot is
+  # stale. Scheduled/manual only, so upstream publishes never break PR CI.
+  freshness:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - run: scripts/update-provider-catalog.sh --check
