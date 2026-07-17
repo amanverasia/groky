@@ -12548,12 +12548,14 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "chrono",
+ "indexmap",
  "reqwest 0.12.24",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "wiremock",
 ]
 

@@ -6,7 +6,9 @@
 
 pub mod cache;
 pub mod credentials;
+pub mod dynamic;
 pub mod layer;
+pub mod limits;
 pub mod normalize;
 pub mod refresh;
 pub mod types;
@@ -16,6 +18,7 @@ pub use credentials::{
     CredentialOrigin, CredentialSources, ProviderAvailability, ProviderStatus, ResolvedCredential,
     SecretString, classify_provider, resolve_credential,
 };
+pub use dynamic::{DynamicConfigError, DynamicProviderConfig};
 pub use layer::{CatalogPatch, ModelPatch, ProviderPatch, apply_patch};
 pub use normalize::normalize_models_dev;
 pub use refresh::{
