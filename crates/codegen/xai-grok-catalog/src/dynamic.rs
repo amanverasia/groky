@@ -9,9 +9,10 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::discovery::DiscoveredModel;
 use crate::layer::ModelPatch;
 use crate::limits::{MAX_ENDPOINT_BYTES, MAX_PROVIDER_ID_BYTES, MAX_PROVIDER_NAME_BYTES};
-use crate::types::{ModelCost, ModelId, Protocol, ProviderId};
+use crate::types::{CatalogModel, ModelCost, ModelId, Protocol, ProviderId};
 
 /// Errors produced while validating dynamic provider configuration.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -194,6 +195,85 @@ impl TryFrom<RawDynamicProviderConfig> for DynamicProviderConfig {
     }
 }
 
+/// Merges runtime-discovered models with statically declared patches.
+///
+/// Discovered models become [`CatalogModel`]s using `default_protocol`, with
+/// missing metadata enriched from `bundled_exact` on an exact full-ID match
+/// only (a discovered `gpt-4o` never inherits from a bundled
+/// `openai/gpt-4o`). Static patches then win field-by-field: `exclude`
+/// removes a model even if discovered, supplied fields override, and
+/// static-only models are appended after the discovered set.
+pub fn merge_dynamic_models<'a>(
+    default_protocol: Protocol,
+    static_models: &IndexMap<ModelId, ModelPatch>,
+    discovered: Vec<DiscoveredModel>,
+    mut bundled_exact: impl FnMut(&ModelId) -> Option<&'a CatalogModel>,
+) -> Vec<CatalogModel> {
+    let mut merged: IndexMap<ModelId, CatalogModel> = IndexMap::new();
+    for model in discovered {
+        if merged.contains_key(&model.id) {
+            continue;
+        }
+        let bundled = bundled_exact(&model.id);
+        let entry = CatalogModel {
+            id: model.id.clone(),
+            name: model
+                .name
+                .or_else(|| bundled.map(|b| b.name.clone()))
+                .unwrap_or_else(|| model.id.as_str().to_string()),
+            protocol: default_protocol,
+            context_window: bundled.and_then(|b| b.context_window),
+            reasoning: bundled.is_some_and(|b| b.reasoning),
+            cost: bundled.and_then(|b| b.cost.clone()),
+        };
+        merged.insert(model.id, entry);
+    }
+
+    for (id, patch) in static_models {
+        if patch.exclude {
+            merged.shift_remove(id);
+            continue;
+        }
+        let model = match merged.get_mut(id) {
+            Some(model) => model,
+            None => {
+                let bundled = bundled_exact(id);
+                merged.insert(
+                    id.clone(),
+                    CatalogModel {
+                        id: id.clone(),
+                        name: bundled
+                            .map(|b| b.name.clone())
+                            .unwrap_or_else(|| id.as_str().to_string()),
+                        protocol: default_protocol,
+                        context_window: bundled.and_then(|b| b.context_window),
+                        reasoning: bundled.is_some_and(|b| b.reasoning),
+                        cost: bundled.and_then(|b| b.cost.clone()),
+                    },
+                );
+                merged.get_mut(id).expect("model just inserted")
+            }
+        };
+        if let Some(name) = &patch.name {
+            model.name = name.clone();
+        }
+        if let Some(protocol) = patch.protocol {
+            model.protocol = protocol;
+        }
+        if let Some(context_window) = patch.context_window {
+            model.context_window = Some(context_window);
+        }
+        if let Some(reasoning) = patch.reasoning {
+            model.reasoning = reasoning;
+        }
+        if let Some(cost) = &patch.cost {
+            model.cost = Some(cost.clone());
+        }
+    }
+
+    merged.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::limits::{
@@ -316,5 +396,135 @@ mod tests {
             err.to_string().contains("endpoint exceeds 2048 bytes"),
             "unexpected error: {err}"
         );
+    }
+
+    fn discovered(id: &str) -> DiscoveredModel {
+        DiscoveredModel::new(id).expect("valid discovered id")
+    }
+
+    fn patch(id: &str) -> ModelPatch {
+        ModelPatch {
+            id: ModelId::new(id).unwrap(),
+            name: None,
+            protocol: None,
+            context_window: None,
+            reasoning: None,
+            cost: None,
+            exclude: false,
+        }
+    }
+
+    fn bundled_gpt4o() -> CatalogModel {
+        CatalogModel {
+            id: ModelId::new("openai/gpt-4o").unwrap(),
+            name: "GPT-4o".to_string(),
+            protocol: Protocol::ChatCompletions,
+            context_window: Some(128_000),
+            reasoning: true,
+            cost: Some(ModelCost {
+                input_per_million: 2.5,
+                output_per_million: 10.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn explicit_static_model_wins_and_exact_catalog_match_enriches_missing_fields() {
+        let bundled = bundled_gpt4o();
+        let mut static_models = IndexMap::new();
+        let mut pinned = patch("openai/gpt-4o");
+        pinned.name = Some("Pinned GPT".to_string());
+        static_models.insert(pinned.id.clone(), pinned);
+
+        let merged = merge_dynamic_models(
+            Protocol::ChatCompletions,
+            &static_models,
+            vec![discovered("openai/gpt-4o"), discovered("best-effort")],
+            |id| (id == &bundled.id).then_some(&bundled),
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id.as_str(), "openai/gpt-4o");
+        assert_eq!(merged[0].name, "Pinned GPT");
+        assert_eq!(merged[0].context_window, Some(128_000));
+        assert!(merged[0].reasoning);
+        assert_eq!(
+            merged[0].cost,
+            Some(ModelCost {
+                input_per_million: 2.5,
+                output_per_million: 10.0,
+            })
+        );
+        assert_eq!(merged[1].id.as_str(), "best-effort");
+        assert_eq!(merged[1].name, "best-effort");
+        assert_eq!(merged[1].context_window, None);
+        assert_eq!(merged[1].protocol, Protocol::ChatCompletions);
+    }
+
+    #[test]
+    fn duplicate_discovered_ids_collapse_in_first_seen_order() {
+        let merged = merge_dynamic_models(
+            Protocol::ChatCompletions,
+            &IndexMap::new(),
+            vec![discovered("b"), discovered("a"), discovered("b")],
+            |_| None,
+        );
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["b", "a"]);
+    }
+
+    #[test]
+    fn enrichment_requires_exact_full_id_match() {
+        let bundled = bundled_gpt4o();
+        let merged = merge_dynamic_models(
+            Protocol::ChatCompletions,
+            &IndexMap::new(),
+            vec![discovered("gpt-4o")],
+            |id| (id == &bundled.id).then_some(&bundled),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id.as_str(), "gpt-4o");
+        assert_eq!(merged[0].name, "gpt-4o");
+        assert_eq!(merged[0].context_window, None);
+        assert!(!merged[0].reasoning);
+        assert_eq!(merged[0].cost, None);
+    }
+
+    #[test]
+    fn static_exclude_removes_model_even_if_discovered() {
+        let mut static_models = IndexMap::new();
+        let mut excluded = patch("openai/gpt-4o");
+        excluded.exclude = true;
+        static_models.insert(excluded.id.clone(), excluded);
+
+        let merged = merge_dynamic_models(
+            Protocol::ChatCompletions,
+            &static_models,
+            vec![discovered("openai/gpt-4o"), discovered("best-effort")],
+            |_| None,
+        );
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["best-effort"]);
+    }
+
+    #[test]
+    fn static_only_models_are_included_with_bundled_enrichment() {
+        let bundled = bundled_gpt4o();
+        let mut static_models = IndexMap::new();
+        let mut pinned = patch("openai/gpt-4o");
+        pinned.name = Some("Pinned GPT".to_string());
+        static_models.insert(pinned.id.clone(), pinned);
+
+        let merged = merge_dynamic_models(
+            Protocol::Responses,
+            &static_models,
+            vec![discovered("best-effort")],
+            |id| (id == &bundled.id).then_some(&bundled),
+        );
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["best-effort", "openai/gpt-4o"]);
+        assert_eq!(merged[1].name, "Pinned GPT");
+        assert_eq!(merged[1].context_window, Some(128_000));
+        assert!(merged[1].reasoning);
     }
 }
