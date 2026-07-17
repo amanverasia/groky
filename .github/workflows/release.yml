@@ -114,7 +114,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+        # The per-tarball .sha256 files must ship alongside the tarballs:
+        # install.sh downloads "<tarball>.sha256" to verify each download.
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --generate-notes \
-            dist/groky-*.tar.gz dist/SHA256SUMS
+            dist/groky-*.tar.gz dist/groky-*.tar.gz.sha256 dist/SHA256SUMS
