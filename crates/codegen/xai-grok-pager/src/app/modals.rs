@@ -358,10 +358,16 @@ impl AgentView {
             }
         }
 
-        // Providers: key entry owns its own Esc; otherwise route chrome first.
+        // Providers: key/URL entry owns its own Esc; otherwise route
+        // chrome first.
         if let ActiveModal::Providers { state } = modal {
             use crate::views::providers_modal::{self, ProvidersMode, ProvidersOutcome};
-            let entering = matches!(state.mode, ProvidersMode::EnteringKey { .. });
+            let entering = matches!(
+                state.mode,
+                ProvidersMode::EnteringKey { .. }
+                    | ProvidersMode::JanusBaseUrl { .. }
+                    | ProvidersMode::JanusApiKey { .. }
+            );
             if !entering {
                 let chrome_cfg = mw::ModalWindowConfig {
                     title: "",

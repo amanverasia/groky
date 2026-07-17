@@ -1005,6 +1005,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![Effect::ClearProviderKey { provider_id }]
         }
         Action::RefreshProviders { force } => vec![Effect::RefreshProviders { force }],
+        Action::SetupJanus(params) => vec![Effect::SetupJanus(params)],
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {
