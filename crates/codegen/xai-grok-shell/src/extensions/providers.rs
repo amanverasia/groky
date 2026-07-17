@@ -10,13 +10,17 @@ use std::sync::Arc;
 
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
-use xai_grok_catalog::{ProviderAvailability, RefreshOutcome, RefreshStatus, classify_provider};
+use xai_grok_catalog::{
+    JanusFailure, ProviderAvailability, RefreshOutcome, RefreshStatus, SecretString,
+    classify_provider, janus_failure,
+};
 
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::agent::models::ModelsManager;
 use crate::agent::provider_catalog::{
-    ProviderCatalogAdapter, ProviderCatalogEvent, apply_config_provider_override,
+    JanusSetupRequest, JanusSetupResult, ProviderCatalogAdapter, ProviderCatalogEvent,
+    apply_config_provider_override,
 };
 
 /// Broadcast method for provider availability changes. Forwarded machine-wide
@@ -97,6 +101,34 @@ pub struct RefreshResponse {
     pub started: bool,
 }
 
+/// Params for `x.ai/providers/setup_janus`. Deliberately does not derive
+/// `Debug`/`Serialize`: `api_key` is a secret and must never be logged or
+/// echoed.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupJanusRequest {
+    pub base_url: String,
+    /// Optional key; `null`/absent leaves any stored key unchanged.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+}
+
+/// Response for `x.ai/providers/setup_janus`. Secret-free.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupJanusResponse {
+    /// `"ready"`, `"empty"`, or `"failed"`.
+    pub state: String,
+    /// Models published when `state == "ready"`.
+    pub model_count: usize,
+    /// Last-known-good models still served when `state == "failed"`.
+    pub cached_models: usize,
+    /// Concise, secret-free user message for non-ready states.
+    pub message: Option<String>,
+}
+
 // ── Dispatch ────────────────────────────────────────────────────────
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
@@ -124,6 +156,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let req = parse_refresh_request(args)?;
             to_raw_response(&refresh_providers(&surface, req))
         }
+        "x.ai/providers/setup_janus" => {
+            let req: SetupJanusRequest = parse_params(args)?;
+            to_raw_response(&setup_janus(&surface, req).await?)
+        }
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -144,7 +180,7 @@ pub fn list_providers(surface: &ProviderSurface) -> Result<ProviderListResponse,
     let adapter = require_adapter(surface)?;
     // Staleness-gated dynamic model discovery rides along with picker/list
     // opens; it self-coalesces and never blocks the response.
-    spawn_dynamic_refresh(surface, &adapter);
+    spawn_dynamic_refresh(surface, &adapter, false);
     let refresh_started = !matches!(*adapter.snapshot().status(), RefreshStatus::Fresh)
         && adapter.try_begin_refresh();
     if refresh_started {
@@ -221,14 +257,70 @@ pub fn refresh_providers(surface: &ProviderSurface, req: RefreshRequest) -> Refr
     let Ok(adapter) = require_adapter(surface) else {
         return RefreshResponse { started: false };
     };
-    // Dynamic providers refresh on the same trigger, gated by their own
-    // cache staleness and in-flight coalescing.
-    spawn_dynamic_refresh(surface, &adapter);
+    // Dynamic providers refresh on the same trigger. An explicit forced
+    // refresh re-discovers unconditionally; otherwise discovery is gated
+    // by the dynamic cache's own staleness (both coalesce in-flight).
+    spawn_dynamic_refresh(surface, &adapter, req.force);
     let started = adapter.try_begin_refresh();
     if started {
         spawn_catalog_refresh(surface, adapter, req.force);
     }
     RefreshResponse { started }
+}
+
+/// `x.ai/providers/setup_janus`: run the adapter's Janus setup flow (URL
+/// validation, secret-free persistence, optional key store, health probe,
+/// discovery), then broadcast provider and model updates so pickers
+/// refresh. The inbound key moves into a [`SecretString`] immediately and
+/// the response is secret-free.
+pub async fn setup_janus(
+    surface: &ProviderSurface,
+    req: SetupJanusRequest,
+) -> Result<SetupJanusResponse, acp::Error> {
+    let adapter = require_adapter(surface)?;
+    let SetupJanusRequest {
+        base_url,
+        api_key,
+        allow_insecure_http,
+    } = req;
+    let request = JanusSetupRequest {
+        base_url,
+        api_key: api_key
+            .filter(|key| !key.trim().is_empty())
+            .map(SecretString::new),
+        allow_insecure_http,
+    };
+    let result = adapter.setup_janus(request).await.map_err(|err| {
+        tracing::warn!(error = %err, "janus setup failed");
+        acp::Error::internal_error().data("failed to store janus provider setup")
+    })?;
+    // Availability and/or the model list may have changed regardless of
+    // outcome (the provider is registered even when unhealthy).
+    broadcast_providers_update(surface, &adapter);
+    surface.models_manager.rebuild_provider_models();
+    Ok(match result {
+        JanusSetupResult::Ready { model_count } => SetupJanusResponse {
+            state: "ready".to_string(),
+            model_count,
+            cached_models: 0,
+            message: None,
+        },
+        JanusSetupResult::Empty => SetupJanusResponse {
+            state: "empty".to_string(),
+            model_count: 0,
+            cached_models: 0,
+            message: Some(janus_failure(&JanusFailure::EmptyModels)),
+        },
+        JanusSetupResult::Failed {
+            message,
+            cached_models,
+        } => SetupJanusResponse {
+            state: "failed".to_string(),
+            model_count: 0,
+            cached_models,
+            message: Some(message),
+        },
+    })
 }
 
 // ── Internals ───────────────────────────────────────────────────────
@@ -324,15 +416,20 @@ fn broadcast_providers_update(surface: &ProviderSurface, adapter: &ProviderCatal
         .broadcast_ext_notification(PROVIDERS_UPDATE_METHOD, &payload);
 }
 
-/// Staleness-gated background refresh of dynamic provider model lists
-/// (semaphore-capped, per-provider coalesced inside the adapter). Published
-/// model lists are recomposed into the shell catalog via the standard
-/// `rebuild_provider_models` path, which preserves a still-valid current
-/// selection and broadcasts `x.ai/models/update`. Never awaits network
-/// before returning.
-fn spawn_dynamic_refresh(surface: &ProviderSurface, adapter: &Arc<ProviderCatalogAdapter>) {
+/// Background refresh of dynamic provider model lists (semaphore-capped,
+/// per-provider coalesced inside the adapter). `force: true` (explicit user
+/// refresh) re-discovers unconditionally; otherwise refreshes are gated by
+/// the dynamic cache's staleness. Published model lists are recomposed into
+/// the shell catalog via the standard `rebuild_provider_models` path, which
+/// preserves a still-valid current selection and broadcasts
+/// `x.ai/models/update`. Never awaits network before returning.
+fn spawn_dynamic_refresh(
+    surface: &ProviderSurface,
+    adapter: &Arc<ProviderCatalogAdapter>,
+    force: bool,
+) {
     let models_manager = surface.models_manager.clone();
-    adapter.refresh_stale_dynamic_in_background(move |event| match event {
+    let on_event = move |event| match event {
         ProviderCatalogEvent::DynamicRefreshComplete { .. } => {
             models_manager.rebuild_provider_models();
         }
@@ -348,7 +445,12 @@ fn spawn_dynamic_refresh(surface: &ProviderSurface, adapter: &Arc<ProviderCatalo
         }
         ProviderCatalogEvent::DynamicRefreshStarted { .. }
         | ProviderCatalogEvent::JanusHealthComplete { .. } => {}
-    });
+    };
+    if force {
+        adapter.refresh_all_dynamic_in_background(on_event);
+    } else {
+        adapter.refresh_stale_dynamic_in_background(on_event);
+    }
 }
 
 /// Background catalog refresh: bounded HTTP fetch, no model discovery. The

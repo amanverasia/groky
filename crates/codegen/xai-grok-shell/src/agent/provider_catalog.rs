@@ -14,8 +14,9 @@ use indexmap::IndexMap;
 use xai_grok_catalog::{
     CachedModel, CachedProviderModels, CatalogError, CatalogModel, CatalogProvider,
     CatalogSnapshot, CredentialOrigin, CredentialSources, DiscoveredModel, DynamicCache,
-    DynamicProviderConfig, HttpError, NormalizedCatalog, Protocol, ProviderAvailability,
-    ProviderId, RequestKind, SecretString, classify_provider, derive_endpoint, get_bounded,
+    DynamicProviderConfig, HttpError, JANUS_PROVIDER_ID, NormalizedCatalog, Protocol,
+    ProviderAvailability, ProviderId, RequestKind, SecretString, classify_provider,
+    derive_endpoint, get_bounded, janus_failure, janus_failure_from_http, janus_preset,
     merge_dynamic_models, parse_model_list, redact_userinfo, resolve_credential, validate_url,
 };
 
@@ -35,6 +36,16 @@ pub const PROVIDER_CATALOG_SOURCE_URL: &str = "https://models.dev/api.json";
 /// File name of the dynamic-discovery last-known-good cache under
 /// `$GROK_HOME`. Secret-free; schema owned by `xai_grok_catalog::dynamic_cache`.
 pub const DYNAMIC_MODELS_CACHE_FILE: &str = "dynamic_models_cache.json";
+
+/// File name of the persisted dynamic-provider registrations under
+/// `$GROK_HOME`. Deliberately secret-free — it stores only `id`,
+/// `base_url`, and `allow_insecure_http` — so the Janus setup flow can be
+/// re-registered on startup without touching config.toml (which has no
+/// shell-side writer) or the auth store (which owns the key).
+pub const DYNAMIC_PROVIDERS_FILE: &str = "dynamic_providers.json";
+
+/// Schema version of [`DYNAMIC_PROVIDERS_FILE`].
+const DYNAMIC_PROVIDERS_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum number of dynamic provider refreshes in flight at once.
 pub const MAX_CONCURRENT_DYNAMIC_REFRESHES: usize = 4;
@@ -88,6 +99,56 @@ pub enum ProviderAdapterError {
     /// A base URL or derived endpoint violates the dynamic URL policy.
     #[error("invalid dynamic provider endpoint: {0}")]
     Endpoint(#[from] HttpError),
+    /// Persisting the provider config or key failed (I/O detail is local
+    /// only; the string carries no secrets).
+    #[error("failed to persist provider setup: {0}")]
+    Storage(String),
+}
+
+/// Input to [`ProviderCatalogAdapter::setup_janus`]. Deliberately does not
+/// implement `Debug`/`Serialize`: the key must never be logged or echoed.
+pub struct JanusSetupRequest {
+    /// Janus base URL (e.g. `http://127.0.0.1:20128/v1`).
+    pub base_url: String,
+    /// Optional API key; `None` leaves any stored key unchanged.
+    pub api_key: Option<SecretString>,
+    /// Whether non-loopback plain HTTP is permitted for this provider.
+    pub allow_insecure_http: bool,
+}
+
+/// Outcome of [`ProviderCatalogAdapter::setup_janus`]. Secret-free.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JanusSetupResult {
+    /// Janus is healthy and discovery published `model_count` models.
+    Ready {
+        /// Number of models published for `janus`.
+        model_count: usize,
+    },
+    /// Janus is healthy but its model list is empty.
+    Empty,
+    /// Setup failed; `message` is concise, actionable, and secret-free.
+    Failed {
+        /// User-facing failure description.
+        message: String,
+        /// Models still available from the last-known-good cache.
+        cached_models: usize,
+    },
+}
+
+/// On-disk shape of [`DYNAMIC_PROVIDERS_FILE`]. Secret-free by design.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedDynamicProviders {
+    schema_version: u32,
+    providers: Vec<PersistedDynamicProvider>,
+}
+
+/// One persisted dynamic-provider registration (no credentials, no models;
+/// models come from the dynamic cache and keys from the auth store).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedDynamicProvider {
+    id: String,
+    base_url: String,
+    allow_insecure_http: bool,
 }
 
 /// Converts a catalog provider/model pair into a shell [`ModelEntry`].
@@ -291,9 +352,12 @@ fn now_unix() -> i64 {
 
 impl ProviderCatalogAdapter {
     /// Builds an adapter over a catalog manager rooted at `grok_home`.
+    /// Re-registers any dynamic providers persisted by earlier setup flows
+    /// (e.g. Janus) from the secret-free [`DYNAMIC_PROVIDERS_FILE`]; no
+    /// network I/O happens here.
     pub fn new(manager: xai_grok_catalog::CatalogManager, grok_home: PathBuf) -> Self {
         let dynamic_cache = DynamicCache::new(grok_home.join(DYNAMIC_MODELS_CACHE_FILE));
-        Self {
+        let adapter = Self {
             manager,
             grok_home,
             session_keys: parking_lot::RwLock::new(std::collections::HashMap::new()),
@@ -306,7 +370,9 @@ impl ProviderCatalogAdapter {
             )),
             dynamic_in_flight: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             discovery_client: xai_grok_catalog::http::client(),
-        }
+        };
+        adapter.register_persisted_dynamic_providers();
+        adapter
     }
 
     /// Builds the production adapter: cache at
@@ -496,14 +562,15 @@ impl ProviderCatalogAdapter {
     /// Performs one bounded model discovery for a registered dynamic
     /// provider and publishes the result into the snapshot layer.
     ///
-    /// The credential is resolved at request time (session > stored;
-    /// `unauthenticated` providers send none). On success the discovered
-    /// list is persisted to the last-known-good cache and merged with static
-    /// config. On failure the cached and/or static models are published
-    /// instead (`cached: true`); with neither, a
-    /// [`ProviderCatalogEvent::DynamicRefreshFailed`] carries a concise,
-    /// secret-free message (401/403 map to an auth hint; attempted URLs are
-    /// userinfo-redacted; bearer text never appears).
+    /// The credential is resolved at request time (session > stored) and
+    /// sent whenever one exists — `unauthenticated` means a key is
+    /// *optional*, not forbidden, so a stored key still authenticates
+    /// discovery. On success the discovered list is persisted to the
+    /// last-known-good cache and merged with static config. On failure the
+    /// cached and/or static models are published instead (`cached: true`);
+    /// with neither, a [`ProviderCatalogEvent::DynamicRefreshFailed`]
+    /// carries a concise, secret-free message (401/403 map to an auth hint;
+    /// attempted URLs are userinfo-redacted; bearer text never appears).
     pub async fn refresh_dynamic(
         &self,
         provider_id: &ProviderId,
@@ -522,14 +589,7 @@ impl ProviderCatalogAdapter {
             config.models_endpoint.as_deref(),
             "models",
         )?;
-        let credential = if config.unauthenticated {
-            None
-        } else {
-            resolve_credential(
-                self.credential_sources(&dynamic_catalog_provider(&config, Vec::new())),
-            )
-            .map(|resolved| resolved.secret)
-        };
+        let credential = self.dynamic_credential(&config);
 
         let discovered = match get_bounded(
             &self.discovery_client,
@@ -661,6 +721,26 @@ impl ProviderCatalogAdapter {
         self: &Arc<Self>,
         on_event: impl Fn(ProviderCatalogEvent) + Send + Sync + 'static,
     ) {
+        self.spawn_dynamic_refreshes(false, on_event);
+    }
+
+    /// Like [`Self::refresh_stale_dynamic_in_background`], but skips the
+    /// cache-staleness gate: every registered discovery-enabled provider is
+    /// re-discovered (still semaphore-capped and per-provider coalesced).
+    /// Used by explicit user refreshes (`x.ai/providers/refresh` with
+    /// `force: true`).
+    pub fn refresh_all_dynamic_in_background(
+        self: &Arc<Self>,
+        on_event: impl Fn(ProviderCatalogEvent) + Send + Sync + 'static,
+    ) {
+        self.spawn_dynamic_refreshes(true, on_event);
+    }
+
+    fn spawn_dynamic_refreshes(
+        self: &Arc<Self>,
+        force: bool,
+        on_event: impl Fn(ProviderCatalogEvent) + Send + Sync + 'static,
+    ) {
         let adapter = Arc::clone(self);
         let on_event: Arc<dyn Fn(ProviderCatalogEvent) + Send + Sync> = Arc::new(on_event);
         tokio::spawn(async move {
@@ -675,7 +755,9 @@ impl ProviderCatalogAdapter {
             if candidates.is_empty() {
                 return;
             }
-            let cache_file = {
+            let cache_file = if force {
+                None
+            } else {
                 let cache = adapter.dynamic_cache.lock().await;
                 cache.load().await.ok()
             };
@@ -683,10 +765,11 @@ impl ProviderCatalogAdapter {
                 .unwrap_or(i64::MAX);
             let now = now_unix();
             for provider_id in candidates {
-                let stale = cache_file
-                    .as_ref()
-                    .and_then(|file| file.provider(&provider_id))
-                    .is_none_or(|entry| now.saturating_sub(entry.fetched_at_unix) >= max_age);
+                let stale = force
+                    || cache_file
+                        .as_ref()
+                        .and_then(|file| file.provider(&provider_id))
+                        .is_none_or(|entry| now.saturating_sub(entry.fetched_at_unix) >= max_age);
                 if !stale {
                     continue;
                 }
@@ -735,6 +818,241 @@ impl ProviderCatalogAdapter {
                 });
             }
         });
+    }
+
+    // ── Janus setup ─────────────────────────────────────────────────
+
+    /// Runs the full Janus setup flow: validate + register the preset with
+    /// the requested base URL, persist the secret-free config, store the
+    /// optional key, health-check the service, then discover and publish
+    /// its models.
+    ///
+    /// Failures that the user can act on (bad URL, unreachable service,
+    /// rejected key, empty/invalid model list) come back as
+    /// [`JanusSetupResult::Failed`]/[`JanusSetupResult::Empty`] with
+    /// secret-free messages; `Err` is reserved for local persistence
+    /// failures. The request is never logged.
+    pub async fn setup_janus(
+        &self,
+        request: JanusSetupRequest,
+    ) -> Result<JanusSetupResult, ProviderAdapterError> {
+        let provider_id =
+            ProviderId::new(JANUS_PROVIDER_ID).expect("the Janus provider id constant is valid");
+        let has_credential_in_request = request.api_key.is_some();
+
+        // 1–2. Preset with overrides, validated + registered (URL policy is
+        // enforced by configure_dynamic before anything is published).
+        let mut config = janus_preset();
+        config.base_url = request.base_url.clone();
+        config.allow_insecure_http = request.allow_insecure_http;
+        if let Err(err) = self.configure_dynamic(config.clone()) {
+            let message = match &err {
+                ProviderAdapterError::Endpoint(http) => {
+                    janus_failure(&janus_failure_from_http(http, &request.base_url))
+                }
+                other => other.to_string(),
+            };
+            let cached_models = self.cached_dynamic_model_count(&provider_id).await;
+            tracing::warn!(
+                provider = provider_id.as_str(),
+                cached_models,
+                "janus setup rejected: invalid endpoint configuration"
+            );
+            return Ok(JanusSetupResult::Failed {
+                message,
+                cached_models,
+            });
+        }
+
+        // 3. Persist the secret-free registration for re-registration on
+        // startup (config.toml has no shell-side writer; see
+        // [`DYNAMIC_PROVIDERS_FILE`]).
+        self.persist_dynamic_provider(&config)
+            .map_err(|err| ProviderAdapterError::Storage(err.to_string()))?;
+
+        // 4. Store the key if one was supplied; `None` leaves any existing
+        // stored key unchanged (clear_key is the explicit removal path).
+        if let Some(key) = request.api_key.as_ref() {
+            crate::auth::store_provider_api_key(
+                &self.grok_home,
+                provider_id.as_str(),
+                key.expose(),
+            )
+            .map_err(|err| ProviderAdapterError::Storage(err.to_string()))?;
+        }
+
+        // 5. Health probe with the resolved credential (stored or request).
+        let health_endpoint = derive_endpoint(
+            &config.base_url,
+            config.health_endpoint.as_deref(),
+            "health",
+        )?;
+        let credential = self.dynamic_credential(&config);
+        let has_credential = credential.is_some() || has_credential_in_request;
+        if let Err(err) = get_bounded(
+            &self.discovery_client,
+            health_endpoint.as_str(),
+            credential.as_ref(),
+            config.allow_insecure_http,
+            RequestKind::Health,
+        )
+        .await
+        {
+            let redacted = redact_userinfo(&health_endpoint);
+            let message = janus_failure(&janus_failure_from_http(&err, &redacted));
+            let cached_models = self.cached_dynamic_model_count(&provider_id).await;
+            tracing::warn!(
+                provider = provider_id.as_str(),
+                url = %redacted,
+                status = "unhealthy",
+                cached_models,
+                has_credential,
+                "janus health probe failed"
+            );
+            return Ok(JanusSetupResult::Failed {
+                message,
+                cached_models,
+            });
+        }
+
+        // 6. Healthy: same discovery/merge/cache path as a normal refresh.
+        let event = self.refresh_dynamic(&provider_id).await?;
+        let result = match event {
+            ProviderCatalogEvent::DynamicRefreshComplete {
+                model_count,
+                cached: false,
+                ..
+            } => {
+                if model_count == 0 {
+                    JanusSetupResult::Empty
+                } else {
+                    JanusSetupResult::Ready { model_count }
+                }
+            }
+            ProviderCatalogEvent::DynamicRefreshComplete {
+                model_count,
+                cached: true,
+                ..
+            } => JanusSetupResult::Failed {
+                message: "Janus is healthy but model discovery failed; showing previously \
+                          discovered models."
+                    .to_string(),
+                cached_models: model_count,
+            },
+            ProviderCatalogEvent::DynamicRefreshFailed { message, .. } => {
+                JanusSetupResult::Failed {
+                    message,
+                    cached_models: 0,
+                }
+            }
+            other => {
+                tracing::warn!(?other, "unexpected event from janus discovery");
+                JanusSetupResult::Failed {
+                    message: janus_failure(&xai_grok_catalog::JanusFailure::InvalidResponse),
+                    cached_models: 0,
+                }
+            }
+        };
+        let (status, model_count) = match &result {
+            JanusSetupResult::Ready { model_count } => ("ready", *model_count),
+            JanusSetupResult::Empty => ("empty", 0),
+            JanusSetupResult::Failed { cached_models, .. } => ("failed", *cached_models),
+        };
+        tracing::info!(
+            provider = provider_id.as_str(),
+            url = %redact_userinfo(&health_endpoint),
+            status,
+            model_count,
+            has_credential,
+            "janus setup finished"
+        );
+        Ok(result)
+    }
+
+    /// Resolves the outbound credential for a dynamic provider (session >
+    /// stored). A credential is sent whenever one exists, even for
+    /// `unauthenticated` providers, where a key is optional.
+    fn dynamic_credential(&self, config: &DynamicProviderConfig) -> Option<SecretString> {
+        resolve_credential(self.credential_sources(&dynamic_catalog_provider(config, Vec::new())))
+            .map(|resolved| resolved.secret)
+    }
+
+    /// Number of models in the last-known-good cache for `provider_id`.
+    async fn cached_dynamic_model_count(&self, provider_id: &ProviderId) -> usize {
+        let cache = self.dynamic_cache.lock().await;
+        cache
+            .load()
+            .await
+            .ok()
+            .and_then(|file| file.provider(provider_id).map(|entry| entry.models.len()))
+            .unwrap_or(0)
+    }
+
+    /// Upserts one provider's secret-free registration into
+    /// [`DYNAMIC_PROVIDERS_FILE`] atomically (temp file + rename, mirroring
+    /// the dynamic cache's write pattern).
+    fn persist_dynamic_provider(&self, config: &DynamicProviderConfig) -> std::io::Result<()> {
+        let path = self.grok_home.join(DYNAMIC_PROVIDERS_FILE);
+        let mut file = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PersistedDynamicProviders>(&bytes).ok())
+            .unwrap_or_default();
+        file.schema_version = DYNAMIC_PROVIDERS_SCHEMA_VERSION;
+        let entry = PersistedDynamicProvider {
+            id: config.id.as_str().to_owned(),
+            base_url: config.base_url.clone(),
+            allow_insecure_http: config.allow_insecure_http,
+        };
+        match file
+            .providers
+            .iter_mut()
+            .find(|p| p.id == config.id.as_str())
+        {
+            Some(existing) => *existing = entry,
+            None => file.providers.push(entry),
+        }
+        std::fs::create_dir_all(&self.grok_home)?;
+        let tmp = path.with_file_name(format!(
+            "{DYNAMIC_PROVIDERS_FILE}.tmp-{}",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&file)?)?;
+        std::fs::rename(&tmp, &path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+    }
+
+    /// Re-registers dynamic providers persisted by earlier setup flows.
+    /// Today only the Janus preset is recognized; unknown ids are skipped.
+    /// Failures are logged, never fatal — a corrupt file must not block
+    /// startup.
+    fn register_persisted_dynamic_providers(&self) {
+        let path = self.grok_home.join(DYNAMIC_PROVIDERS_FILE);
+        let Some(file) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PersistedDynamicProviders>(&bytes).ok())
+        else {
+            return;
+        };
+        for persisted in file.providers {
+            if persisted.id != JANUS_PROVIDER_ID {
+                tracing::debug!(
+                    provider = %persisted.id,
+                    "skipping persisted dynamic provider with no known preset"
+                );
+                continue;
+            }
+            let mut config = janus_preset();
+            config.base_url = persisted.base_url;
+            config.allow_insecure_http = persisted.allow_insecure_http;
+            if let Err(err) = self.configure_dynamic(config) {
+                tracing::warn!(
+                    provider = %persisted.id,
+                    error = %err,
+                    "failed to re-register persisted dynamic provider"
+                );
+            }
+        }
     }
 
     fn credential_sources(&self, provider: &CatalogProvider) -> CredentialSources {
