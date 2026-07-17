@@ -12548,6 +12548,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "chrono",
+ "futures-util",
  "indexmap",
  "reqwest 0.12.24",
  "serde",
@@ -12556,6 +12557,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "url",
  "wiremock",
 ]
 

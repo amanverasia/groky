@@ -14,11 +14,14 @@ generator = []
 [dependencies]
 arc-swap = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+futures-util = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

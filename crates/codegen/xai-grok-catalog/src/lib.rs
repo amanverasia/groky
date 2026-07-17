@@ -8,6 +8,7 @@ pub mod cache;
 pub mod credentials;
 pub mod discovery;
 pub mod dynamic;
+pub mod http;
 pub mod layer;
 pub mod limits;
 pub mod normalize;
@@ -21,6 +22,9 @@ pub use credentials::{
 };
 pub use discovery::{DiscoveredModel, DiscoveryError, parse_model_list};
 pub use dynamic::{DynamicConfigError, DynamicProviderConfig, merge_dynamic_models};
+pub use http::{
+    BoundedResponse, HttpError, RequestKind, derive_endpoint, get_bounded, validate_url,
+};
 pub use layer::{CatalogPatch, ModelPatch, ProviderPatch, apply_patch};
 pub use normalize::normalize_models_dev;
 pub use refresh::{
