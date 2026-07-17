@@ -15,8 +15,8 @@ use ratatui::text::{Line, Span};
 use crate::app::actions::Action;
 use crate::providers::{
     JANUS_DEFAULT_BASE_URL, JANUS_INSECURE_URL_WARNING, JanusSetupParams, JanusSetupResponse,
-    ProviderListResponse, ProviderRowView, ProviderStatus, SecretKey, is_insecure_non_loopback_http,
-    janus_result_message,
+    ProviderListResponse, ProviderRowView, ProviderStatus, SecretKey,
+    is_insecure_non_loopback_http, janus_result_message,
 };
 use crate::theme::Theme;
 use crate::views::modal_window::{
@@ -183,9 +183,7 @@ impl ProvidersModalState {
     pub fn rendered_key(&self) -> String {
         match &self.mode {
             ProvidersMode::EnteringKey { buffer, .. }
-            | ProvidersMode::JanusApiKey { buffer, .. } => {
-                "*".repeat(buffer.chars().count())
-            }
+            | ProvidersMode::JanusApiKey { buffer, .. } => "*".repeat(buffer.chars().count()),
             _ => String::new(),
         }
     }
@@ -793,10 +791,7 @@ pub fn render_providers_overlay(
                 buf.set_line(
                     content.x,
                     y,
-                    &Line::from(Span::styled(
-                        "optional, starts with sk-janus-",
-                        dim,
-                    )),
+                    &Line::from(Span::styled("optional, starts with sk-janus-", dim)),
                     content.width,
                 );
             }
@@ -822,10 +817,7 @@ pub fn render_providers_overlay(
                 buf.set_line(
                     content.x,
                     y,
-                    &Line::from(Span::styled(
-                        chunk,
-                        Style::default().fg(theme.text_primary),
-                    )),
+                    &Line::from(Span::styled(chunk, Style::default().fg(theme.text_primary))),
                     content.width,
                 );
                 y += 1;

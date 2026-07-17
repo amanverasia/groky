@@ -363,12 +363,9 @@ mod tests {
 
     #[test]
     fn invalid_lengths_are_rejected_at_config_boundary() {
-        let err = DynamicProviderConfig::new(
-            "x".repeat(65),
-            "Gateway",
-            "https://gateway.example/v1",
-        )
-        .expect_err("65-byte provider id must be rejected");
+        let err =
+            DynamicProviderConfig::new("x".repeat(65), "Gateway", "https://gateway.example/v1")
+                .expect_err("65-byte provider id must be rejected");
         assert_eq!(err, DynamicConfigError::ProviderIdTooLong);
     }
 

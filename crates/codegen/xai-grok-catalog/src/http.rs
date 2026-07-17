@@ -188,9 +188,7 @@ async fn follow_and_read(
     for redirects in 0..=MAX_REDIRECTS {
         validate_url(&url, allow_insecure_http)?;
         let mut request = client.get(url.clone());
-        if send_credential
-            && let Some(secret) = credential
-        {
+        if send_credential && let Some(secret) = credential {
             request = request.bearer_auth(secret.expose());
         }
         let response = request.send().await.map_err(|err| {
@@ -267,9 +265,13 @@ mod tests {
             "https://gateway.example/v1/models"
         );
         assert_eq!(
-            derive_endpoint("https://gateway.example/api", Some("/custom/models"), "models")
-                .unwrap()
-                .as_str(),
+            derive_endpoint(
+                "https://gateway.example/api",
+                Some("/custom/models"),
+                "models"
+            )
+            .unwrap()
+            .as_str(),
             "https://gateway.example/custom/models"
         );
     }
@@ -313,9 +315,7 @@ mod tests {
 
     #[test]
     fn literal_localhost_is_accepted_without_opt_in() {
-        assert!(
-            validate_url(&url::Url::parse("http://localhost:9000/x").unwrap(), false).is_ok()
-        );
+        assert!(validate_url(&url::Url::parse("http://localhost:9000/x").unwrap(), false).is_ok());
         // Only the exact literal "localhost" qualifies; other names are denied.
         assert_eq!(
             validate_url(&url::Url::parse("http://evil.example/x").unwrap(), false).unwrap_err(),

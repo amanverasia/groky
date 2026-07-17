@@ -86,8 +86,8 @@ pub fn parse_model_list(body: &[u8]) -> Result<Vec<DiscoveredModel>, DiscoveryEr
     if body.len() > MAX_DISCOVERY_BODY_BYTES {
         return Err(DiscoveryError::BodyTooLarge);
     }
-    let value: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|err| DiscoveryError::InvalidJson(err.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|err| DiscoveryError::InvalidJson(err.to_string()))?;
     let data = value
         .get("data")
         .and_then(serde_json::Value::as_array)
@@ -135,7 +135,11 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["openai/gpt-4o", "best-effort", "anthropic/claude-3-5-sonnet"]
+            [
+                "openai/gpt-4o",
+                "best-effort",
+                "anthropic/claude-3-5-sonnet"
+            ]
         );
     }
 
@@ -176,10 +180,7 @@ mod tests {
             DiscoveryError::ModelIdTooLong { index: 0 }
         );
 
-        let overlong_name = format!(
-            r#"{{"data":[{{"id":"ok","name":"{}"}}]}}"#,
-            "n".repeat(513)
-        );
+        let overlong_name = format!(r#"{{"data":[{{"id":"ok","name":"{}"}}]}}"#, "n".repeat(513));
         assert_eq!(
             parse_model_list(overlong_name.as_bytes()).unwrap_err(),
             DiscoveryError::ModelNameTooLong { index: 0 }

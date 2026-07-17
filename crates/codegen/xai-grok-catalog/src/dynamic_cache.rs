@@ -218,8 +218,8 @@ fn store_provider_sync(
 fn write_atomic(path: &Path, file: &DynamicCacheFile) -> Result<(), DynamicCacheError> {
     static NONCE: AtomicU64 = AtomicU64::new(0);
 
-    let bytes = serde_json::to_vec_pretty(file)
-        .map_err(|err| DynamicCacheError::Io(err.to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(file).map_err(|err| DynamicCacheError::Io(err.to_string()))?;
     let file_name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -406,7 +406,11 @@ mod tests {
             cache.load().await,
             Err(DynamicCacheError::SchemaVersion { found: 999 })
         ));
-        assert_eq!(std::fs::read(&path).unwrap(), bytes, "file must be untouched");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "file must be untouched"
+        );
     }
 
     #[tokio::test]
@@ -478,11 +482,8 @@ mod tests {
 
     #[tokio::test]
     async fn valid_empty_response_replaces_nonempty_cache() {
-        let outcome = DynamicRefreshOutcome::from_result(
-            Ok(Vec::new()),
-            Some(sample_entry()),
-            2_000_000,
-        );
+        let outcome =
+            DynamicRefreshOutcome::from_result(Ok(Vec::new()), Some(sample_entry()), 2_000_000);
         assert!(outcome.models().is_empty());
         assert_eq!(outcome.status(), DynamicRefreshStatus::Empty);
         assert_eq!(outcome.refresh_error(), None);
@@ -494,11 +495,8 @@ mod tests {
             id: ModelId::new("new-model").unwrap(),
             name: Some("New Model".to_string()),
         }];
-        let outcome = DynamicRefreshOutcome::from_result(
-            Ok(fresh.clone()),
-            Some(sample_entry()),
-            2_000_000,
-        );
+        let outcome =
+            DynamicRefreshOutcome::from_result(Ok(fresh.clone()), Some(sample_entry()), 2_000_000);
         assert_eq!(outcome.models(), fresh.as_slice());
         assert_eq!(outcome.status(), DynamicRefreshStatus::Fresh);
         assert_eq!(outcome.refresh_error(), None);

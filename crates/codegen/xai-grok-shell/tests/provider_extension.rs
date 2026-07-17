@@ -409,7 +409,10 @@ async fn refresh_respects_staleness_gate_unless_forced() {
         }
         tokio::task::yield_now().await;
     }
-    assert!(!adapter.refresh_in_flight(), "refresh slot must be released");
+    assert!(
+        !adapter.refresh_in_flight(),
+        "refresh slot must be released"
+    );
     // The manager-side gate is what the non-forced task runs: with a fresh
     // cache it returns Fresh without touching the (unreachable) network.
     assert!(matches!(

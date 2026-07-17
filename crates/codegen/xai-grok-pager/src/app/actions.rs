@@ -615,7 +615,9 @@ pub enum Action {
     /// Start a coalesced background provider-catalog refresh. `force: true`
     /// (the explicit `r` key in `/providers`) bypasses the 24h staleness
     /// gate; picker-open refreshes use `force: false`.
-    RefreshProviders { force: bool },
+    RefreshProviders {
+        force: bool,
+    },
     /// Submit the guided Janus setup (base URL + optional key) from the
     /// `/providers` modal. The params' manual `Debug` prints only
     /// `has_api_key`, never key text.

@@ -28,9 +28,12 @@ pub const JANUS_KEY_HINT: &str = "optional, starts with sk-janus-";
 /// by default (a key is optional), discovers its model list at runtime, and
 /// exposes explicit health and models endpoints.
 pub fn janus_preset() -> DynamicProviderConfig {
-    let mut config =
-        DynamicProviderConfig::new(JANUS_PROVIDER_ID, JANUS_DISPLAY_NAME, JANUS_DEFAULT_BASE_URL)
-            .expect("Janus preset constants satisfy config bounds");
+    let mut config = DynamicProviderConfig::new(
+        JANUS_PROVIDER_ID,
+        JANUS_DISPLAY_NAME,
+        JANUS_DEFAULT_BASE_URL,
+    )
+    .expect("Janus preset constants satisfy config bounds");
     config.protocol = Protocol::ChatCompletions;
     config.unauthenticated = true;
     config.discover = true;
@@ -161,7 +164,10 @@ mod tests {
             janus_failure_from_http(&HttpError::Status(403), url),
             JanusFailure::Authentication
         );
-        assert_eq!(janus_failure_from_http(&HttpError::Timeout, url), connection);
+        assert_eq!(
+            janus_failure_from_http(&HttpError::Timeout, url),
+            connection
+        );
         assert_eq!(
             janus_failure_from_http(&HttpError::Transport("connection refused".into()), url),
             connection
@@ -210,10 +216,8 @@ mod tests {
 
     #[test]
     fn failure_messages_never_leak_urls_with_userinfo_secrets() {
-        let failure = janus_failure_from_http(
-            &HttpError::Timeout,
-            "http://127.0.0.1:20128/v1/health",
-        );
+        let failure =
+            janus_failure_from_http(&HttpError::Timeout, "http://127.0.0.1:20128/v1/health");
         assert!(!janus_failure(&failure).contains("sk-"));
     }
 }

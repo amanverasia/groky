@@ -19,7 +19,10 @@ fn config() -> SamplerConfig {
 fn sampler_config_debug_never_contains_key_or_prefix() {
     let rendered = format!("{:?}", config());
     assert!(!rendered.contains(SECRET), "full key leaked: {rendered}");
-    assert!(!rendered.contains("sk-janus"), "key prefix leaked: {rendered}");
+    assert!(
+        !rendered.contains("sk-janus"),
+        "key prefix leaked: {rendered}"
+    );
     assert!(
         rendered.contains("has_api_key: true"),
         "expected boolean presence marker: {rendered}"
@@ -30,5 +33,8 @@ fn sampler_config_debug_never_contains_key_or_prefix() {
 fn sampling_client_debug_never_contains_key_or_prefix() {
     let rendered = format!("{:?}", SamplingClient::new(config()).unwrap());
     assert!(!rendered.contains(SECRET), "full key leaked: {rendered}");
-    assert!(!rendered.contains("sk-janus"), "key prefix leaked: {rendered}");
+    assert!(
+        !rendered.contains("sk-janus"),
+        "key prefix leaked: {rendered}"
+    );
 }

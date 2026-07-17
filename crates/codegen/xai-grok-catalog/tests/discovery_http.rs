@@ -28,9 +28,7 @@ async fn same_origin_redirect_keeps_bearer() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/models"))
-        .respond_with(
-            ResponseTemplate::new(302).insert_header("location", "/v1/models-final"),
-        )
+        .respond_with(ResponseTemplate::new(302).insert_header("location", "/v1/models-final"))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -61,10 +59,10 @@ async fn cross_origin_redirect_strips_bearer() {
 
     Mock::given(method("GET"))
         .and(path("/v1/models"))
-        .respond_with(ResponseTemplate::new(307).insert_header(
-            "location",
-            format!("{}/v1/models", target.uri()).as_str(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/v1/models", target.uri()).as_str()),
+        )
         .mount(&origin)
         .await;
     Mock::given(method("GET"))

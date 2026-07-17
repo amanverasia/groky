@@ -443,10 +443,9 @@ fn janus_setup_response_parses_shell_wire_format() {
     )
     .expect("failed state parses");
     assert_eq!(failed.state, JanusSetupState::Failed);
-    let empty: JanusSetupResponse = serde_json::from_str(
-        r#"{"state":"empty","modelCount":0,"cachedModels":0,"message":"m"}"#,
-    )
-    .expect("empty state parses");
+    let empty: JanusSetupResponse =
+        serde_json::from_str(r#"{"state":"empty","modelCount":0,"cachedModels":0,"message":"m"}"#)
+            .expect("empty state parses");
     assert_eq!(empty.state, JanusSetupState::Empty);
 }
 
@@ -458,8 +457,12 @@ fn insecure_url_check_flags_only_non_loopback_http() {
     assert!(!is_insecure_non_loopback_http("http://127.0.0.1:20128/v1"));
     assert!(!is_insecure_non_loopback_http("http://localhost:20128/v1"));
     assert!(!is_insecure_non_loopback_http("http://[::1]:20128/v1"));
-    assert!(!is_insecure_non_loopback_http("https://janus.example.com/v1"));
-    assert!(is_insecure_non_loopback_http("http://192.168.1.50:20128/v1"));
+    assert!(!is_insecure_non_loopback_http(
+        "https://janus.example.com/v1"
+    ));
+    assert!(is_insecure_non_loopback_http(
+        "http://192.168.1.50:20128/v1"
+    ));
     assert!(is_insecure_non_loopback_http("http://janus.lan/v1"));
     assert!(is_insecure_non_loopback_http("http://user@janus.lan/v1"));
 }
