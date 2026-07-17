@@ -5,15 +5,18 @@
 //! the produced [`ModelEntry`] has no `api_key`/`env_key`. Credentials are
 //! resolved at call time by the credential seam in `agent::config`.
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 use xai_grok_catalog::{
-    CatalogError, CatalogModel, CatalogProvider, CatalogSnapshot, CredentialOrigin,
-    CredentialSources, NormalizedCatalog, Protocol, ProviderAvailability, ProviderId, SecretString,
-    classify_provider, resolve_credential,
+    CachedModel, CachedProviderModels, CatalogError, CatalogModel, CatalogProvider,
+    CatalogSnapshot, CredentialOrigin, CredentialSources, DiscoveredModel, DynamicCache,
+    DynamicProviderConfig, HttpError, NormalizedCatalog, Protocol, ProviderAvailability,
+    ProviderId, RequestKind, SecretString, classify_provider, derive_endpoint, get_bounded,
+    merge_dynamic_models, parse_model_list, redact_userinfo, resolve_credential, validate_url,
 };
 
 use crate::agent::config::{
@@ -28,6 +31,64 @@ pub const PROVIDER_CATALOG_CACHE_FILE: &str = "provider_catalog.json";
 
 /// Upstream source of the provider catalog (24-hour freshness).
 pub const PROVIDER_CATALOG_SOURCE_URL: &str = "https://models.dev/api.json";
+
+/// File name of the dynamic-discovery last-known-good cache under
+/// `$GROK_HOME`. Secret-free; schema owned by `xai_grok_catalog::dynamic_cache`.
+pub const DYNAMIC_MODELS_CACHE_FILE: &str = "dynamic_models_cache.json";
+
+/// Maximum number of dynamic provider refreshes in flight at once.
+pub const MAX_CONCURRENT_DYNAMIC_REFRESHES: usize = 4;
+
+/// Outcome of a dynamic-provider orchestration step, for surfaces (pickers,
+/// notifications). All variants are secret-free.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderCatalogEvent {
+    /// A background dynamic refresh began for `provider_id`.
+    DynamicRefreshStarted {
+        /// The dynamic provider being refreshed.
+        provider_id: ProviderId,
+    },
+    /// A dynamic refresh finished and a model list was published.
+    DynamicRefreshComplete {
+        /// The dynamic provider that was refreshed.
+        provider_id: ProviderId,
+        /// Number of models now published for the provider.
+        model_count: usize,
+        /// `true` when discovery failed and the published models came from
+        /// the last-known-good cache and/or static config instead.
+        cached: bool,
+    },
+    /// A dynamic refresh failed and nothing could be published.
+    DynamicRefreshFailed {
+        /// The dynamic provider whose refresh failed.
+        provider_id: ProviderId,
+        /// Concise, secret-free failure description.
+        message: String,
+    },
+    /// A Janus health probe finished (wired up by the Janus setup flow;
+    /// unused until then).
+    JanusHealthComplete {
+        /// Whether the service answered its health endpoint.
+        healthy: bool,
+        /// Concise, secret-free status text.
+        message: String,
+    },
+}
+
+/// Errors from dynamic-provider configuration and refresh orchestration.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ProviderAdapterError {
+    /// The provider id collides with a provider owned by a dedicated flow.
+    #[error("provider id {0:?} is reserved")]
+    ReservedProviderId(String),
+    /// The provider was never registered via
+    /// [`ProviderCatalogAdapter::configure_dynamic`].
+    #[error("unknown dynamic provider {0:?}")]
+    UnknownDynamicProvider(String),
+    /// A base URL or derived endpoint violates the dynamic URL policy.
+    #[error("invalid dynamic provider endpoint: {0}")]
+    Endpoint(#[from] HttpError),
+}
 
 /// Converts a catalog provider/model pair into a shell [`ModelEntry`].
 ///
@@ -171,16 +232,80 @@ pub struct ProviderCatalogAdapter {
     session_keys: parking_lot::RwLock<std::collections::HashMap<String, String>>,
     /// Coalesces background catalog refreshes: only one may be in flight.
     refresh_in_flight: std::sync::atomic::AtomicBool,
+    /// Registered dynamic providers and their published model layers.
+    dynamic: parking_lot::Mutex<DynamicState>,
+    /// Memoized composition of the manager snapshot plus dynamic layers,
+    /// keyed by base-snapshot identity and dynamic generation.
+    composed: parking_lot::Mutex<Option<ComposedSnapshot>>,
+    /// Last-known-good discovery cache. All writes serialize behind this
+    /// async mutex because `DynamicCache::store_provider` is
+    /// read-modify-write and concurrent stores would lose updates.
+    dynamic_cache: tokio::sync::Mutex<DynamicCache>,
+    /// Caps concurrent dynamic refreshes at
+    /// [`MAX_CONCURRENT_DYNAMIC_REFRESHES`].
+    dynamic_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Providers with a background refresh in flight (coalescing).
+    dynamic_in_flight: Arc<parking_lot::Mutex<HashSet<String>>>,
+    /// Policy-enforcing discovery client (manual redirects, no auto-auth).
+    discovery_client: reqwest::Client,
+}
+
+/// Registered dynamic providers plus their currently published model lists.
+#[derive(Default)]
+struct DynamicState {
+    configs: IndexMap<String, DynamicProviderConfig>,
+    models: IndexMap<String, Vec<CatalogModel>>,
+    /// Bumped on any mutation; invalidates the composed-snapshot memo.
+    generation: u64,
+}
+
+struct ComposedSnapshot {
+    base: Arc<CatalogSnapshot>,
+    generation: u64,
+    composed: Arc<CatalogSnapshot>,
+}
+
+/// The provider entry a dynamic config contributes to the catalog layer.
+/// Secret-free: dynamic providers have no env var names; credentials come
+/// from session/stored scopes keyed by provider id.
+fn dynamic_catalog_provider(
+    config: &DynamicProviderConfig,
+    models: Vec<CatalogModel>,
+) -> CatalogProvider {
+    CatalogProvider {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        api_base_url: config.base_url.clone(),
+        env_vars: Vec::new(),
+        unauthenticated: config.unauthenticated,
+        models,
+    }
+}
+
+fn now_unix() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    }
 }
 
 impl ProviderCatalogAdapter {
     /// Builds an adapter over a catalog manager rooted at `grok_home`.
     pub fn new(manager: xai_grok_catalog::CatalogManager, grok_home: PathBuf) -> Self {
+        let dynamic_cache = DynamicCache::new(grok_home.join(DYNAMIC_MODELS_CACHE_FILE));
         Self {
             manager,
             grok_home,
             session_keys: parking_lot::RwLock::new(std::collections::HashMap::new()),
             refresh_in_flight: std::sync::atomic::AtomicBool::new(false),
+            dynamic: parking_lot::Mutex::new(DynamicState::default()),
+            composed: parking_lot::Mutex::new(None),
+            dynamic_cache: tokio::sync::Mutex::new(dynamic_cache),
+            dynamic_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_DYNAMIC_REFRESHES,
+            )),
+            dynamic_in_flight: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            discovery_client: xai_grok_catalog::http::client(),
         }
     }
 
@@ -197,9 +322,49 @@ impl ProviderCatalogAdapter {
         Self::new(manager, grok_home)
     }
 
-    /// Current immutable catalog snapshot.
+    /// Current immutable catalog snapshot: the manager's snapshot with each
+    /// registered dynamic provider's published model list layered on top
+    /// (between bundled+cache and explicit `[provider.*]`/`[model.*]` config
+    /// patches, which apply during composition). Memoized per (base,
+    /// generation); with no dynamic layers this is the manager snapshot.
     pub fn snapshot(&self) -> Arc<CatalogSnapshot> {
-        self.manager.snapshot()
+        let base = self.manager.snapshot();
+        let (layers, generation) = {
+            let dynamic = self.dynamic.lock();
+            if dynamic.models.is_empty() {
+                return base;
+            }
+            let layers: Vec<CatalogProvider> = dynamic
+                .models
+                .iter()
+                .filter_map(|(id, models)| {
+                    dynamic
+                        .configs
+                        .get(id)
+                        .map(|config| dynamic_catalog_provider(config, models.clone()))
+                })
+                .collect();
+            (layers, dynamic.generation)
+        };
+        {
+            let memo = self.composed.lock();
+            if let Some(memo) = memo.as_ref()
+                && Arc::ptr_eq(&memo.base, &base)
+                && memo.generation == generation
+            {
+                return Arc::clone(&memo.composed);
+            }
+        }
+        let mut composed = Arc::clone(&base);
+        for provider in layers {
+            composed = composed.with_dynamic_models(provider);
+        }
+        *self.composed.lock() = Some(ComposedSnapshot {
+            base,
+            generation,
+            composed: Arc::clone(&composed),
+        });
+        composed
     }
 
     /// Attempts to claim the single background-refresh slot. Returns `true`
@@ -237,9 +402,7 @@ impl ProviderCatalogAdapter {
     /// Refreshes only when the cache is missing or older than the manager's
     /// refresh interval (24h); a fresh cache returns without network I/O.
     /// Callers coordinate coalescing via [`Self::try_begin_refresh`].
-    pub async fn refresh_if_stale(
-        &self,
-    ) -> Result<xai_grok_catalog::RefreshOutcome, CatalogError> {
+    pub async fn refresh_if_stale(&self) -> Result<xai_grok_catalog::RefreshOutcome, CatalogError> {
         self.manager.refresh_if_stale().await
     }
 
@@ -255,7 +418,7 @@ impl ProviderCatalogAdapter {
     /// by the per-entry credential seam, not here. The returned secret is
     /// never retained by the adapter.
     pub fn credential_for(&self, provider_id: &ProviderId) -> Option<SecretString> {
-        let snapshot = self.manager.snapshot();
+        let snapshot = self.snapshot();
         let provider = snapshot.catalog().provider(provider_id)?;
         resolve_credential(self.credential_sources(provider)).map(|resolved| resolved.secret)
     }
@@ -270,10 +433,295 @@ impl ProviderCatalogAdapter {
     /// Qualified `provider/model` entries for every provider that is
     /// configured (or keyed via environment) under `cfg`'s overrides.
     pub fn configured_model_entries(&self, cfg: &Config) -> IndexMap<String, ModelEntry> {
-        let snapshot = self.manager.snapshot();
+        let snapshot = self.snapshot();
         provider_model_entries(snapshot.catalog(), cfg, |provider| {
             self.credential_origin(provider)
         })
+    }
+
+    // ── Dynamic providers ───────────────────────────────────────────
+
+    /// Registers a user-declared dynamic provider.
+    ///
+    /// Validates the inference base URL and the derived models/health
+    /// endpoints against the provider's actual `allow_insecure_http` flag
+    /// BEFORE anything is registered or published: a provider must not pass
+    /// discovery only to later send prompts or credentials to a disallowed
+    /// plain-HTTP inference URL. Statically declared models are published
+    /// immediately (no network I/O); discovered models arrive via
+    /// [`Self::refresh_dynamic`]. Rejects ids owned by dedicated flows
+    /// (`xai`).
+    pub fn configure_dynamic(
+        &self,
+        config: DynamicProviderConfig,
+    ) -> Result<(), ProviderAdapterError> {
+        if config.id.as_str() == "xai" {
+            return Err(ProviderAdapterError::ReservedProviderId(
+                config.id.as_str().to_owned(),
+            ));
+        }
+        let base = url::Url::parse(&config.base_url)
+            .map_err(|err| HttpError::InvalidUrl(err.to_string()))?;
+        validate_url(&base, config.allow_insecure_http)?;
+        let models_endpoint = derive_endpoint(
+            &config.base_url,
+            config.models_endpoint.as_deref(),
+            "models",
+        )?;
+        validate_url(&models_endpoint, config.allow_insecure_http)?;
+        let health_endpoint = derive_endpoint(
+            &config.base_url,
+            config.health_endpoint.as_deref(),
+            "health",
+        )?;
+        validate_url(&health_endpoint, config.allow_insecure_http)?;
+
+        // Publish the static layer (possibly empty) so the provider is
+        // visible in snapshots and its statically declared models are
+        // usable without a discovery round-trip.
+        let statics = {
+            let snapshot = self.manager.snapshot();
+            merge_dynamic_models(config.protocol, &config.models, Vec::new(), |id| {
+                snapshot.bundled_model_by_exact_id(id)
+            })
+        };
+        let mut dynamic = self.dynamic.lock();
+        let id = config.id.as_str().to_owned();
+        dynamic.configs.insert(id.clone(), config);
+        dynamic.models.insert(id, statics);
+        dynamic.generation += 1;
+        Ok(())
+    }
+
+    /// Performs one bounded model discovery for a registered dynamic
+    /// provider and publishes the result into the snapshot layer.
+    ///
+    /// The credential is resolved at request time (session > stored;
+    /// `unauthenticated` providers send none). On success the discovered
+    /// list is persisted to the last-known-good cache and merged with static
+    /// config. On failure the cached and/or static models are published
+    /// instead (`cached: true`); with neither, a
+    /// [`ProviderCatalogEvent::DynamicRefreshFailed`] carries a concise,
+    /// secret-free message (401/403 map to an auth hint; attempted URLs are
+    /// userinfo-redacted; bearer text never appears).
+    pub async fn refresh_dynamic(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Result<ProviderCatalogEvent, ProviderAdapterError> {
+        let config = self
+            .dynamic
+            .lock()
+            .configs
+            .get(provider_id.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ProviderAdapterError::UnknownDynamicProvider(provider_id.as_str().to_owned())
+            })?;
+        let endpoint = derive_endpoint(
+            &config.base_url,
+            config.models_endpoint.as_deref(),
+            "models",
+        )?;
+        let credential = if config.unauthenticated {
+            None
+        } else {
+            resolve_credential(
+                self.credential_sources(&dynamic_catalog_provider(&config, Vec::new())),
+            )
+            .map(|resolved| resolved.secret)
+        };
+
+        let discovered = match get_bounded(
+            &self.discovery_client,
+            endpoint.as_str(),
+            credential.as_ref(),
+            config.allow_insecure_http,
+            RequestKind::Discovery,
+        )
+        .await
+        {
+            Ok(response) => parse_model_list(&response.body).map_err(|err| {
+                format!(
+                    "invalid model list from {}: {err}",
+                    redact_userinfo(&endpoint)
+                )
+            }),
+            Err(HttpError::Status(code @ (401 | 403))) => Err(format!(
+                "authentication failed (HTTP {code}); update the provider API key"
+            )),
+            Err(err) => Err(format!(
+                "model discovery failed for {}: {err}",
+                redact_userinfo(&endpoint)
+            )),
+        };
+
+        match discovered {
+            Ok(models) => {
+                let entry = CachedProviderModels {
+                    provider_id: provider_id.clone(),
+                    base_url: config.base_url.clone(),
+                    fetched_at_unix: now_unix(),
+                    models: models
+                        .iter()
+                        .map(|model| CachedModel {
+                            id: model.id.clone(),
+                            name: model.name.clone(),
+                        })
+                        .collect(),
+                };
+                // All cache writes hold this async mutex for the whole
+                // read-modify-write, so concurrent refreshes cannot lose
+                // each other's provider entries.
+                let stored = {
+                    let cache = self.dynamic_cache.lock().await;
+                    cache.store_provider(entry).await
+                };
+                if let Err(err) = stored {
+                    tracing::warn!(
+                        provider = provider_id.as_str(),
+                        error = %err,
+                        "failed to persist dynamic model cache"
+                    );
+                }
+                let model_count = self.publish_dynamic_models(&config, models);
+                Ok(ProviderCatalogEvent::DynamicRefreshComplete {
+                    provider_id: provider_id.clone(),
+                    model_count,
+                    cached: false,
+                })
+            }
+            Err(message) => {
+                let cached = {
+                    let cache = self.dynamic_cache.lock().await;
+                    cache
+                        .load()
+                        .await
+                        .ok()
+                        .and_then(|file| file.provider(provider_id).cloned())
+                };
+                if cached.is_none() && config.models.is_empty() {
+                    return Ok(ProviderCatalogEvent::DynamicRefreshFailed {
+                        provider_id: provider_id.clone(),
+                        message,
+                    });
+                }
+                tracing::warn!(
+                    provider = provider_id.as_str(),
+                    %message,
+                    "dynamic discovery failed; serving cached/static models"
+                );
+                let discovered = cached
+                    .map(|entry| {
+                        entry
+                            .models
+                            .into_iter()
+                            .map(|model| DiscoveredModel {
+                                id: model.id,
+                                name: model.name,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let model_count = self.publish_dynamic_models(&config, discovered);
+                Ok(ProviderCatalogEvent::DynamicRefreshComplete {
+                    provider_id: provider_id.clone(),
+                    model_count,
+                    cached: true,
+                })
+            }
+        }
+    }
+
+    /// Merges discovered/cached models with static config (bundled-catalog
+    /// enrichment on exact full-ID match) and publishes the layer.
+    fn publish_dynamic_models(
+        &self,
+        config: &DynamicProviderConfig,
+        discovered: Vec<DiscoveredModel>,
+    ) -> usize {
+        let snapshot = self.manager.snapshot();
+        let merged = merge_dynamic_models(config.protocol, &config.models, discovered, |id| {
+            snapshot.bundled_model_by_exact_id(id)
+        });
+        let count = merged.len();
+        let mut dynamic = self.dynamic.lock();
+        dynamic.models.insert(config.id.as_str().to_owned(), merged);
+        dynamic.generation += 1;
+        count
+    }
+
+    /// Spawns background refreshes for every registered discovery-enabled
+    /// dynamic provider whose cache entry is missing or older than
+    /// `DYNAMIC_CACHE_MAX_AGE`. At most
+    /// [`MAX_CONCURRENT_DYNAMIC_REFRESHES`] run concurrently; per-provider
+    /// refreshes coalesce via an in-flight set. Never performs network I/O
+    /// before returning; `on_event` receives every start/completion/failure
+    /// (secret-free) and is where callers recompose the model catalog.
+    pub fn refresh_stale_dynamic_in_background(
+        self: &Arc<Self>,
+        on_event: impl Fn(ProviderCatalogEvent) + Send + Sync + 'static,
+    ) {
+        let adapter = Arc::clone(self);
+        let on_event: Arc<dyn Fn(ProviderCatalogEvent) + Send + Sync> = Arc::new(on_event);
+        tokio::spawn(async move {
+            let candidates: Vec<ProviderId> = adapter
+                .dynamic
+                .lock()
+                .configs
+                .values()
+                .filter(|config| config.discover)
+                .map(|config| config.id.clone())
+                .collect();
+            if candidates.is_empty() {
+                return;
+            }
+            let cache_file = {
+                let cache = adapter.dynamic_cache.lock().await;
+                cache.load().await.ok()
+            };
+            let max_age = i64::try_from(xai_grok_catalog::limits::DYNAMIC_CACHE_MAX_AGE.as_secs())
+                .unwrap_or(i64::MAX);
+            let now = now_unix();
+            for provider_id in candidates {
+                let stale = cache_file
+                    .as_ref()
+                    .and_then(|file| file.provider(&provider_id))
+                    .is_none_or(|entry| now.saturating_sub(entry.fetched_at_unix) >= max_age);
+                if !stale {
+                    continue;
+                }
+                if !adapter
+                    .dynamic_in_flight
+                    .lock()
+                    .insert(provider_id.as_str().to_owned())
+                {
+                    continue;
+                }
+                let adapter = Arc::clone(&adapter);
+                let on_event = Arc::clone(&on_event);
+                tokio::spawn(async move {
+                    let _permit = Arc::clone(&adapter.dynamic_semaphore)
+                        .acquire_owned()
+                        .await
+                        .expect("dynamic refresh semaphore is never closed");
+                    on_event(ProviderCatalogEvent::DynamicRefreshStarted {
+                        provider_id: provider_id.clone(),
+                    });
+                    let result = adapter.refresh_dynamic(&provider_id).await;
+                    adapter
+                        .dynamic_in_flight
+                        .lock()
+                        .remove(provider_id.as_str());
+                    match result {
+                        Ok(event) => on_event(event),
+                        Err(err) => on_event(ProviderCatalogEvent::DynamicRefreshFailed {
+                            provider_id,
+                            message: err.to_string(),
+                        }),
+                    }
+                });
+            }
+        });
     }
 
     fn credential_sources(&self, provider: &CatalogProvider) -> CredentialSources {

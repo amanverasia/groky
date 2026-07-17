@@ -15,7 +15,9 @@ use xai_grok_catalog::{ProviderAvailability, RefreshOutcome, RefreshStatus, clas
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::agent::models::ModelsManager;
-use crate::agent::provider_catalog::{ProviderCatalogAdapter, apply_config_provider_override};
+use crate::agent::provider_catalog::{
+    ProviderCatalogAdapter, ProviderCatalogEvent, apply_config_provider_override,
+};
 
 /// Broadcast method for provider availability changes. Forwarded machine-wide
 /// by the leader, like `x.ai/models/update`.
@@ -140,6 +142,9 @@ pub fn parse_refresh_request(args: &acp::ExtRequest) -> Result<RefreshRequest, a
 /// Spawns a single coalesced background refresh when the catalog is stale.
 pub fn list_providers(surface: &ProviderSurface) -> Result<ProviderListResponse, acp::Error> {
     let adapter = require_adapter(surface)?;
+    // Staleness-gated dynamic model discovery rides along with picker/list
+    // opens; it self-coalesces and never blocks the response.
+    spawn_dynamic_refresh(surface, &adapter);
     let refresh_started = !matches!(*adapter.snapshot().status(), RefreshStatus::Fresh)
         && adapter.try_begin_refresh();
     if refresh_started {
@@ -216,6 +221,9 @@ pub fn refresh_providers(surface: &ProviderSurface, req: RefreshRequest) -> Refr
     let Ok(adapter) = require_adapter(surface) else {
         return RefreshResponse { started: false };
     };
+    // Dynamic providers refresh on the same trigger, gated by their own
+    // cache staleness and in-flight coalescing.
+    spawn_dynamic_refresh(surface, &adapter);
     let started = adapter.try_begin_refresh();
     if started {
         spawn_catalog_refresh(surface, adapter, req.force);
@@ -314,6 +322,33 @@ fn broadcast_providers_update(surface: &ProviderSurface, adapter: &ProviderCatal
     surface
         .models_manager
         .broadcast_ext_notification(PROVIDERS_UPDATE_METHOD, &payload);
+}
+
+/// Staleness-gated background refresh of dynamic provider model lists
+/// (semaphore-capped, per-provider coalesced inside the adapter). Published
+/// model lists are recomposed into the shell catalog via the standard
+/// `rebuild_provider_models` path, which preserves a still-valid current
+/// selection and broadcasts `x.ai/models/update`. Never awaits network
+/// before returning.
+fn spawn_dynamic_refresh(surface: &ProviderSurface, adapter: &Arc<ProviderCatalogAdapter>) {
+    let models_manager = surface.models_manager.clone();
+    adapter.refresh_stale_dynamic_in_background(move |event| match event {
+        ProviderCatalogEvent::DynamicRefreshComplete { .. } => {
+            models_manager.rebuild_provider_models();
+        }
+        ProviderCatalogEvent::DynamicRefreshFailed {
+            provider_id,
+            message,
+        } => {
+            tracing::warn!(
+                provider = provider_id.as_str(),
+                %message,
+                "dynamic provider refresh failed"
+            );
+        }
+        ProviderCatalogEvent::DynamicRefreshStarted { .. }
+        | ProviderCatalogEvent::JanusHealthComplete { .. } => {}
+    });
 }
 
 /// Background catalog refresh: bounded HTTP fetch, no model discovery. The

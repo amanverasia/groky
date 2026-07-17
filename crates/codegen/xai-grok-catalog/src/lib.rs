@@ -29,7 +29,8 @@ pub use dynamic_cache::{
     DynamicCache, DynamicCacheError, DynamicCacheFile, DynamicRefreshOutcome, DynamicRefreshStatus,
 };
 pub use http::{
-    BoundedResponse, HttpError, RequestKind, derive_endpoint, get_bounded, validate_url,
+    BoundedResponse, HttpError, RequestKind, derive_endpoint, get_bounded, redact_userinfo,
+    validate_url,
 };
 pub use janus::{
     JANUS_DEFAULT_BASE_URL, JANUS_DISPLAY_NAME, JANUS_HEALTH_ENDPOINT, JANUS_KEY_HINT,

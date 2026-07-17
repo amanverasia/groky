@@ -103,6 +103,35 @@ impl CatalogSnapshot {
     pub fn status(&self) -> &RefreshStatus {
         &self.status
     }
+
+    /// Copy-on-write snapshot with `provider`'s entry replaced (or appended)
+    /// in the effective catalog.
+    ///
+    /// This is the dynamic-provider layer: it sits on top of the
+    /// embedded+cache catalog and carries a runtime-discovered (or
+    /// statically declared) model list. The receiver is untouched; indexes
+    /// are positional lookups over `providers`, so upserting the entry is a
+    /// complete rebuild. Snapshots stay fully secret-free: `provider` holds
+    /// only IDs, names, URLs, and env var *names*.
+    pub fn with_dynamic_models(
+        &self,
+        provider: crate::types::CatalogProvider,
+    ) -> Arc<CatalogSnapshot> {
+        let mut catalog = (*self.effective).clone();
+        match catalog
+            .providers
+            .iter_mut()
+            .find(|existing| existing.id == provider.id)
+        {
+            Some(existing) => *existing = provider,
+            None => catalog.providers.push(provider),
+        }
+        Arc::new(CatalogSnapshot {
+            effective: Arc::new(catalog),
+            bundled: Arc::clone(&self.bundled),
+            status: self.status.clone(),
+        })
+    }
 }
 
 /// Secret-free metadata about the on-disk cache.

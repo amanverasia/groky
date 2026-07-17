@@ -127,6 +127,19 @@ pub fn validate_url(url: &Url, allow_insecure_http: bool) -> Result<(), HttpErro
     }
 }
 
+/// Renders a URL with any embedded userinfo stripped, for use in
+/// user-facing failure messages. Defense in depth: [`validate_url`] rejects
+/// userinfo anyway, but a message-building path must never rely on that.
+pub fn redact_userinfo(url: &Url) -> String {
+    if url.username().is_empty() && url.password().is_none() {
+        return url.to_string();
+    }
+    let mut url = url.clone();
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.to_string()
+}
+
 /// Builds a client with automatic redirects disabled; redirects are followed
 /// manually in [`get_bounded`] so credentials can be stripped cross-origin.
 pub fn client() -> reqwest::Client {
