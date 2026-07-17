@@ -57,7 +57,7 @@ the full provider configuration guide.
 
 ### One-line installer
 
-Installs the latest release to `~/.local/bin/groky` (Linux and macOS,
+Installs the latest release to `~/.local/bin/groky` (Linux,
 x86_64 and aarch64; no sudo):
 
 ```sh
@@ -141,7 +141,7 @@ See [`TODO.md`](TODO.md) for tracked follow-up work.
 
 Things that do not exist yet:
 
-- [x] **Releases** — prebuilt binaries for Linux and macOS (x86_64 + aarch64),
+- [x] **Releases** — prebuilt binaries for Linux (x86_64 + aarch64),
   tag-driven via GitHub Actions; see [`docs/releasing.md`](docs/releasing.md)
 - [x] **One-line installer** — [`install.sh`](install.sh) with checksum
   verification
@@ -149,6 +149,9 @@ Things that do not exist yet:
   under `~/.groky` (with automatic migration from `~/.grok`)
 - [ ] **groky.dev website** — landing page and hosted documentation (will also
   serve `install.sh`)
+- [ ] **macOS release builds** — the GitHub macOS runners hung on the first
+  attempt; matrix entries are disabled in `release.yml` pending diagnosis
+  (building from source on macOS works)
 - [ ] **Windows builds** — currently best-effort/untested
 - [ ] **CI breadth** — build/test/lint pipeline beyond the provider-catalog
   check, including the telemetry scan gate
