@@ -40,9 +40,13 @@ tarball="groky-${version}-${target}.tar.gz"
 
 workdir=$(mktemp -d)
 server_pid=""
+install_dir=""
+install_dir2=""
 cleanup() {
-    [ -n "$server_pid" ] && kill "$server_pid" 2>/dev/null
-    rm -rf "$workdir"
+    if [ -n "$server_pid" ]; then
+        kill "$server_pid" 2>/dev/null || true
+    fi
+    rm -rf "$workdir" "$install_dir" "$install_dir2"
 }
 trap cleanup EXIT
 
@@ -63,14 +67,26 @@ cp "$binary" "$repo_root/LICENSE" "$repo_root/THIRD-PARTY-NOTICES" \
 )
 
 # --- Serve it over localhost --------------------------------------------------
-port=8931
-python3 -m http.server "$port" --bind 127.0.0.1 --directory "$workdir/serve" \
-    >/dev/null 2>&1 &
-server_pid=$!
-for _ in $(seq 1 50); do
-    curl -fsS "http://127.0.0.1:$port/" >/dev/null 2>&1 && break
-    sleep 0.1
-done
+# Random high port; retry once in case of a collision with another process.
+start_server() {
+    port=$(( (RANDOM % 20000) + 20000 ))
+    python3 -m http.server "$port" --bind 127.0.0.1 \
+        --directory "$workdir/serve" >/dev/null 2>&1 &
+    server_pid=$!
+    for _ in $(seq 1 50); do
+        if curl -fsS "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    kill "$server_pid" 2>/dev/null || true
+    server_pid=""
+    return 1
+}
+start_server || start_server || {
+    echo "error: could not start a local http server" >&2
+    exit 1
+}
 
 base="http://127.0.0.1:$port"
 
@@ -90,8 +106,9 @@ esac
 
 # --- Checksum mismatch must fail ------------------------------------------------
 echo "corrupt" >> "$workdir/serve/$tarball"
+install_dir2=$(mktemp -d)
 if GROKY_DOWNLOAD_BASE="$base" GROKY_VERSION="$tag" \
-    GROKY_INSTALL_DIR="$(mktemp -d)" bash "$repo_root/install.sh" \
+    GROKY_INSTALL_DIR="$install_dir2" bash "$repo_root/install.sh" \
     >/dev/null 2>&1; then
     echo "FAIL: installer accepted a corrupted tarball" >&2
     exit 1
