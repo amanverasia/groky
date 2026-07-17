@@ -230,6 +230,11 @@ path = "tests/pty_e2e_persistence.rs"
 name = "pty_e2e_clipboard"
 path = "tests/pty_e2e_clipboard.rs"
 
+# Dynamic provider (Janus) setup + inference PTY e2e (plan 3 Task 11).
+[[test]]
+name = "pty_e2e_provider_setup"
+path = "tests/pty_e2e_provider_setup.rs"
+
 # Leader-mode PTY e2e — split from ordinary PTY families so multi-process
 # cluster bring-up never contends with their bounded pools.
 [[test]]

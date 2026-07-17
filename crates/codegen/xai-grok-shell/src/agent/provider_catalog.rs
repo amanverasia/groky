@@ -190,11 +190,12 @@ pub fn model_entry_from_catalog(
         env_key: None,
         api_base_url: None,
         provider_id: Some(provider.id.clone()),
-        credential_policy: if provider.unauthenticated {
-            CredentialPolicy::None
-        } else {
-            CredentialPolicy::ProviderApiKey
-        },
+        // `unauthenticated` means a key is *optional*, not forbidden (the
+        // same contract discovery/health follow): the ProviderApiKey seam
+        // resolves session > stored > environment and yields no header when
+        // nothing exists, so keyless providers still work while a stored
+        // key (e.g. Janus setup) authenticates inference too.
+        credential_policy: CredentialPolicy::ProviderApiKey,
         provider_meta: Some(ProviderModelMeta {
             provider_name: provider.name.clone(),
             input_cost_per_million: model.cost.as_ref().map(|c| c.input_per_million),
