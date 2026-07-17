@@ -81,11 +81,11 @@ Requirements:
 git clone https://github.com/amanverasia/groky.git
 cd groky
 cargo run -p xai-grok-pager-bin              # build + launch the TUI
-cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xai-grok-pager
+cargo build -p xai-grok-pager-bin --release  # release binary: target/release/groky
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
-The binary artifact is currently still named `xai-grok-pager` (upstream ships
+The binary artifact is named `groky` (upstream ships
 it as `grok`). Add your provider API keys with `/providers` on first launch,
 or sign in with an xAI account.
 
@@ -105,7 +105,7 @@ Provider configuration is documented in
 
 | Path | Contents |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `xai-grok-pager` binary |
+| `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `groky` binary |
 | `crates/codegen/xai-grok-pager` | The TUI: scrollback, prompt, modals, rendering |
 | `crates/codegen/xai-grok-shell` | Agent runtime + leader/stdio/headless entry points |
 | `crates/codegen/xai-grok-catalog` | Provider/model catalog, discovery, credential handling (fork addition) |
