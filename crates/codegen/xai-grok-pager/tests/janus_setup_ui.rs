@@ -17,7 +17,7 @@ use xai_grok_pager::providers::{
 use xai_grok_pager::theme::Theme;
 use xai_grok_pager::views::providers_modal::{
     ProvidersModalState, ProvidersMode, ProvidersOutcome, handle_providers_key,
-    render_providers_overlay,
+    render_providers_overlay, route_providers_modal_key,
 };
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -127,11 +127,20 @@ fn key_screen_shows_optional_hints_and_masks_input() {
     assert_eq!(modal.rendered_key(), "*".repeat("sk-janus-topsecret".len()));
 }
 
+/// Modal in the checking state, awaiting the setup task result.
+fn modal_checking() -> ProvidersModalState {
+    let mut modal = modal_on_janus_row();
+    modal.mode = ProvidersMode::JanusChecking {
+        base_url: JANUS_DEFAULT_BASE_URL.to_string(),
+    };
+    modal
+}
+
 // ── 3. Failed result appends the cached-models sentence ──────────────
 
 #[test]
 fn failed_result_with_cached_models_appends_cached_sentence() {
-    let mut modal = modal_on_janus_row();
+    let mut modal = modal_checking();
     modal.apply_janus_setup(Ok(JanusSetupResponse {
         state: JanusSetupState::Failed,
         model_count: 0,
@@ -155,7 +164,7 @@ fn failed_result_with_cached_models_appends_cached_sentence() {
 
 #[test]
 fn failed_result_without_cached_models_shows_message_alone() {
-    let mut modal = modal_on_janus_row();
+    let mut modal = modal_checking();
     modal.apply_janus_setup(Ok(JanusSetupResponse {
         state: JanusSetupState::Failed,
         model_count: 0,
@@ -174,7 +183,7 @@ fn failed_result_without_cached_models_shows_message_alone() {
 
 #[test]
 fn empty_result_shows_exact_no_models_message() {
-    let mut modal = modal_on_janus_row();
+    let mut modal = modal_checking();
     modal.apply_janus_setup(Ok(JanusSetupResponse {
         state: JanusSetupState::Empty,
         model_count: 0,
@@ -313,10 +322,19 @@ fn ready_result_shows_exact_message_and_key_is_cleared() {
     );
     assert_eq!(modal.rendered_key(), "", "buffer must be cleared on submit");
     let checking_text = render_to_text(&mut modal);
-    assert!(
-        checking_text.contains("Checking Janus health at http://127.0.0.1:20128/v1"),
-        "missing checking notice in:\n{checking_text}"
+    // The checking line must match the spec copy exactly (no trailing
+    // ellipsis or other decoration).
+    let checking_line = checking_text
+        .lines()
+        .find(|l| l.contains("Checking"))
+        .expect("checking notice must render")
+        .trim_matches(|c: char| c.is_whitespace() || c == '\u{2502}')
+        .trim();
+    assert_eq!(
+        checking_line,
+        "Checking Janus health at http://127.0.0.1:20128/v1"
     );
+    assert!(!checking_text.contains('\u{2026}'));
     assert!(!checking_text.contains("sk-janus-topsecret"));
     assert!(!format!("{:?}", modal.mode).contains("sk-janus-topsecret"));
 
@@ -335,6 +353,73 @@ fn ready_result_shows_exact_message_and_key_is_cleared() {
     let result_text = render_to_text(&mut modal);
     assert!(result_text.contains("Janus is ready. 2 models available."));
     assert!(!result_text.contains("sk-janus-topsecret"));
+}
+
+// ── Result-screen keys stay inside the modal (full key path) ─────────
+
+/// Esc (and Enter) on the Janus result screen must return to the provider
+/// list, not close the modal: `route_providers_modal_key` is the complete
+/// providers key path (modal chrome first, then the inner handler), exactly
+/// as `AgentView::handle_modal_key` drives it.
+#[test]
+fn result_screen_esc_returns_to_list_through_full_modal_path() {
+    for code in [KeyCode::Esc, KeyCode::Enter] {
+        let mut modal = modal_checking();
+        modal.apply_janus_setup(Ok(JanusSetupResponse {
+            state: JanusSetupState::Ready,
+            model_count: 2,
+            cached_models: 0,
+            message: None,
+        }));
+        match route_providers_modal_key(&mut modal, &key(code)) {
+            ProvidersOutcome::Changed => {}
+            ProvidersOutcome::Close => {
+                panic!("{code:?} on the result screen must not close the modal")
+            }
+            _ => panic!("expected Changed outcome for {code:?}"),
+        }
+        assert!(
+            matches!(modal.mode, ProvidersMode::List),
+            "{code:?} must return to the provider list"
+        );
+    }
+
+    // Sanity: chrome Esc still closes the modal from the list itself.
+    let mut modal = modal_on_janus_row();
+    assert!(matches!(
+        route_providers_modal_key(&mut modal, &key(KeyCode::Esc)),
+        ProvidersOutcome::Close
+    ));
+}
+
+// ── Late results only land while checking ────────────────────────────
+
+/// A `JanusSetupComplete` that arrives after the user has left the
+/// checking state (Esc-closed and reopened the modal, started key entry,
+/// …) must not hijack the current screen.
+#[test]
+fn late_setup_result_is_ignored_outside_checking_state() {
+    let ready = JanusSetupResponse {
+        state: JanusSetupState::Ready,
+        model_count: 2,
+        cached_models: 0,
+        message: None,
+    };
+
+    // List mode: ignored.
+    let mut modal = modal_on_janus_row();
+    modal.apply_janus_setup(Ok(ready.clone()));
+    assert!(matches!(modal.mode, ProvidersMode::List));
+
+    // Key-entry mode for another provider: ignored.
+    let mut modal = ProvidersModalState::entering_key("openai", "OpenAI", false);
+    modal.insert_str("sk-openai-secret");
+    modal.apply_janus_setup(Ok(ready));
+    assert!(
+        matches!(modal.mode, ProvidersMode::EnteringKey { .. }),
+        "late result must not replace key entry"
+    );
+    assert_eq!(modal.rendered_key(), "*".repeat("sk-openai-secret".len()));
 }
 
 // ── Wire format ───────────────────────────────────────────────────────
