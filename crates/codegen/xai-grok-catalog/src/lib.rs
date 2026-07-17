@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod dynamic;
 pub mod dynamic_cache;
 pub mod http;
+pub mod janus;
 pub mod layer;
 pub mod limits;
 pub mod normalize;
@@ -29,6 +30,11 @@ pub use dynamic_cache::{
 };
 pub use http::{
     BoundedResponse, HttpError, RequestKind, derive_endpoint, get_bounded, validate_url,
+};
+pub use janus::{
+    JANUS_DEFAULT_BASE_URL, JANUS_DISPLAY_NAME, JANUS_HEALTH_ENDPOINT, JANUS_KEY_HINT,
+    JANUS_MODELS_ENDPOINT, JANUS_PROVIDER_ID, JanusFailure, janus_failure,
+    janus_failure_from_http, janus_preset,
 };
 pub use layer::{CatalogPatch, ModelPatch, ProviderPatch, apply_patch};
 pub use normalize::normalize_models_dev;
