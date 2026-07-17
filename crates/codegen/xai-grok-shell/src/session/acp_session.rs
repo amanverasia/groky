@@ -185,8 +185,6 @@ pub(crate) struct InputItem {
     pub(crate) prompt_id: String,
     pub(crate) prompt_blocks: Vec<ContentBlock>,
     pub(crate) prompt_mode: PromptMode,
-    pub(crate) trace_gcs_config: Option<crate::session::repo_changes::TraceExportConfig>,
-    pub(crate) artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
     /// Optional client identifier from the prompt request meta (overrides session-level one)
     pub(crate) client_identifier: Option<String>,
     /// See [`SessionCommand::Prompt::screen_mode`]. Telemetry-only.
@@ -685,8 +683,6 @@ pub(crate) struct SessionActor {
     pub(crate) origin_client: Option<crate::http::OriginClientInfo>,
     /// Feedback manager for signal tracking and feedback request heuristics
     pub(crate) feedback_manager: Arc<FeedbackManager>,
-    pub(crate) upload_queue:
-        std::sync::Arc<std::sync::OnceLock<xai_file_utils::queue::UploadQueue>>,
     /// Cancellation token for the feedback sync loop (None if no feedback client)
     pub(crate) sync_loop_cancel: Option<tokio_util::sync::CancellationToken>,
     /// The fully-built Agent: owns the ToolBridge, system prompt, policies,
@@ -1036,10 +1032,6 @@ pub(crate) struct SessionActor {
     /// goal totals via [`Self::goal_tokens`].
     pub(crate) subagent_token_records: parking_lot::Mutex<HashMap<String, SubagentTokenRecord>>,
     pub(crate) workspace_ops: xai_grok_workspace::WorkspaceOps,
-    /// Template for building trace configs on synthetic auto-wake turns.
-    /// Captured from the first real user prompt's trace config so synthetic
-    /// turns can upload artifacts using the same bucket/method.
-    pub(crate) trace_config_template: std::cell::RefCell<Option<TraceConfigTemplate>>,
     /// Layer-3 LazinessDetector: monotonic counter bumped whenever a
     /// fresh (non-synthetic) user prompt arrives at the actor.
     /// `maybe_fire_laziness_check` snapshots the value at start and
@@ -1075,16 +1067,6 @@ pub(crate) struct SessionActor {
     /// session spawn; concurrent appends rely on `O_APPEND`'s atomic
     /// guarantee for writes under `PIPE_BUF` (JSONL lines fit).
     pub(crate) laziness_debug_log: Option<std::sync::Arc<std::path::Path>>,
-}
-/// Template for building trace configs on synthetic auto-wake turns.
-///
-/// Captured from the first real user prompt's `TraceExportConfig` so
-/// synthetic turns can upload artifacts to the same GCS bucket using
-/// the same upload method (direct / proxy).
-#[derive(Clone)]
-pub(crate) struct TraceConfigTemplate {
-    pub(crate) bucket_url: Option<String>,
-    pub(crate) upload_method: crate::session::repo_changes::UploadMethod,
 }
 impl SessionActor {
     /// Get the signals handle for tracking session events.

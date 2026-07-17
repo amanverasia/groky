@@ -2551,16 +2551,46 @@ fn config_layers_user_overrides_managed() {
             &layers.effective_config_disk_only(),
         )
         .unwrap();
+    // Telemetry is local-only: every accepted value parses to Disabled, and
+    // the user layer still wins the merge (the key is present, not dropped).
     assert_eq!(
-        Some(crate ::agent::config::TelemetryMode::Enabled), cfg.features.telemetry
+        Some(crate ::agent::config::TelemetryMode::Disabled), cfg.features.telemetry
+    );
+    assert!(! cfg.is_telemetry_enabled());
+}
+/// The external-OTEL config keys were removed along with the OTLP export
+/// pipelines. Managed/user configs that still carry them must parse fine
+/// (unknown keys are tolerated) and produce no enforcement: telemetry stays
+/// disabled and the keys have no effect.
+#[test]
+fn removed_external_otel_keys_are_inert() {
+    let layers = ConfigLayers {
+        system_managed: toml::Value::Table(Default::default()),
+        managed: toml::from_str(
+            "[telemetry]\notel_enabled = true\notel_logs_exporter = \"otlp\"\notel_endpoint = \"https://collector.corp.example:4318\"\n",
+        )
+        .unwrap(),
+        user: toml::Value::Table(Default::default()),
+        user_requirements: None,
+        system_requirements: None,
+        mdm_requirements: None,
+        ..Default::default()
+    };
+    let cfg =
+        crate::agent::config::Config::new_from_toml_cfg(&layers.effective_config_disk_only())
+            .expect("removed otel keys must not break config parsing");
+    assert!(!cfg.is_telemetry_enabled());
+    assert_eq!(
+        cfg.resolve_telemetry_mode().value,
+        crate::agent::config::TelemetryMode::Disabled,
     );
 }
 /// REGRESSION: the real enterprise two-file merge —
 /// `managed_config.toml` (proxy + BYO model host) layered with
-/// `requirements.toml` (deployment key + S3 trace upload) via the actual
+/// `requirements.toml` (deployment key) via the actual
 /// `ConfigLayers::effective_config()` path — must resolve the deployment-config
-/// fetch to cli-chat-proxy, never the model host, and must preserve the
-/// customer's S3 trace-upload endpoint.
+/// fetch to cli-chat-proxy, never the model host. Legacy trace-upload endpoint
+/// keys in requirements are tolerated (parse without error) and ignored.
 #[test]
 #[serial_test::serial]
 fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
@@ -2619,10 +2649,6 @@ trace_upload_endpoint_url = "https://s3.acme-corp.example"
         "https://cli-chat-proxy.grok.com/v1/deployment/config"
     );
     assert!(! cfg.endpoints.resolve_managed_config_url().contains("acme-corp"));
-    assert_eq!(
-        cfg.endpoints.trace_upload_endpoint_url.as_deref(),
-        Some("https://s3.acme-corp.example")
-    );
     assert!(cfg.endpoints.deployment_key.is_some());
 }
 #[test]
@@ -2672,7 +2698,8 @@ fn config_layers_system_managed_lowest_priority() {
         )
         .unwrap();
     assert_eq!(
-        Some(crate ::agent::config::TelemetryMode::Enabled), cfg.features.telemetry
+        Some(crate ::agent::config::TelemetryMode::Disabled), cfg.features.telemetry,
+        "user layer wins the merge, and all modes resolve to Disabled"
     );
 }
 #[test]
@@ -2703,7 +2730,7 @@ fn apply_requirements_value_overrides_user_settings() {
         enforced.iter().any(| e | e.path == "features.remote_fetch" && e.value ==
         "false")
     );
-    assert_eq!(Some(false), cfg.telemetry.trace_upload);
+    assert_eq!(Some(false), cfg.requirements.trace_upload.pinned());
     assert_eq!(Some(false), cfg.cli.auto_update);
     assert!(! cfg.ui.yolo);
     assert!(! cfg.default_yolo_mode);
@@ -2726,17 +2753,11 @@ fn apply_requirements_value_overrides_user_settings() {
     assert!(
         enforced.iter().any(| e | e.path == "ui.yolo" && e.value == "--yolo blocked")
     );
-    assert_eq!(
-        Some("https://s3.custom.example.com"), cfg.endpoints.trace_upload_endpoint_url
-        .as_deref()
-    );
+    // Removed trace-upload endpoint keys are ignored: no config fields exist
+    // for them anymore and no enforcement records are produced.
     assert!(
-        cfg.endpoints.trace_upload_credentials.is_some(),
-        "trace_upload_credentials should be set"
-    );
-    assert!(
-        enforced.iter().any(| e | e.path == "endpoints.trace_upload_credentials" && e
-        .value == "[redacted]")
+        enforced.iter().all(| e | ! e.path.starts_with("endpoints.trace_upload")),
+        "removed trace-upload endpoint keys must not produce enforcement records"
     );
     assert_eq!(
         Some("enterprise-deploy-key-should-not-log"), cfg.endpoints.deployment_key
@@ -2751,12 +2772,16 @@ fn apply_requirements_value_overrides_user_settings() {
         "enterprise-deploy-key-should-not-log"),
         "raw deployment_key must not appear in enforced audit entries"
     );
-    assert!(! cfg.telemetry.mixpanel_enabled);
-    assert_eq!(Some("enterprise-mp-token"), cfg.telemetry.mixpanel_token.as_deref());
+    // Legacy `[telemetry]` mixpanel keys are ignored: no config fields exist
+    // for them anymore and no enforcement records are produced.
+    assert!(! cfg.is_telemetry_enabled());
     assert!(
-        enforced.iter().any(| e | e.path == "telemetry.mixpanel_token" && e.value ==
-        "[redacted]")
+        enforced.iter().all(| e | e.path != "telemetry.mixpanel_token"),
+        "removed mixpanel keys must not produce enforcement records"
     );
+    // `trace_upload = false` requirement resolves disabled without an audit
+    // record (only ignored `true` requests are reported).
+    assert!(enforced.iter().all(| e | e.path != "telemetry.trace_upload"));
 }
 /// Strict precedence: requirement always wins (covers from-None and
 /// from-higher-user cases). The enforced floor lives in
@@ -2835,14 +2860,19 @@ fn apply_requirements_telemetry_string_form_pins_known_modes_only() {
         (cfg, enforced)
     };
     let (cfg, enforced) = apply("[features]\ntelemetry = \"session_metrics\"\n");
-    assert_eq!(
-        cfg.requirements.telemetry.pinned(), Some(TelemetryMode::SessionMetrics),
-    );
+    assert_eq!(cfg.requirements.telemetry.pinned(), Some(TelemetryMode::Disabled),);
     assert!(
-        enforced.iter().any(| e | e.path == "features.telemetry" && e.value ==
-        "session_metrics"),
+        enforced.iter().any(| e | e.path == "features.telemetry" && e.value == "false"),
     );
+    assert!(! cfg.is_telemetry_enabled());
+    // Any non-empty string parses to Disabled in local-only mode.
     let (cfg, enforced) = apply("[features]\ntelemetry = \"garbage\"\n");
+    assert_eq!(cfg.requirements.telemetry.pinned(), Some(TelemetryMode::Disabled));
+    assert!(
+        enforced.iter().any(| e | e.path == "features.telemetry" && e.value == "false")
+    );
+    // Empty string does not parse, so nothing is pinned.
+    let (cfg, enforced) = apply("[features]\ntelemetry = \"\"\n");
     assert_eq!(cfg.requirements.telemetry.pinned(), None);
     assert!(! enforced.iter().any(| e | e.path == "features.telemetry"));
 }
@@ -2888,7 +2918,7 @@ fn validate_hooks_path_accepts_grok_hooks_subdir() {
 fn managed_settings_disables_features_and_requirements_overrides() {
     use xai_grok_workspace::permission::resolution::ManagedSettingsFeatures;
     let mut cfg = crate::agent::config::Config::default();
-    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
+    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
     cfg.features.feedback = Some(true);
     cfg.default_yolo_mode = true;
     let features = ManagedSettingsFeatures {
@@ -2914,7 +2944,8 @@ fn managed_settings_disables_features_and_requirements_overrides() {
     };
     apply_requirements_inner(&mut cfg, &req, &source);
     assert_eq!(
-        cfg.features.telemetry, Some(crate ::agent::config::TelemetryMode::Enabled)
+        cfg.features.telemetry, Some(crate ::agent::config::TelemetryMode::Disabled),
+        "requirements may re-pin telemetry, but only Disabled exists now"
     );
     assert_eq!(cfg.features.feedback, Some(true));
     assert!(cfg.ui.yolo);
@@ -2925,7 +2956,7 @@ fn managed_settings_disables_features_and_requirements_overrides() {
 fn managed_settings_does_not_override_user_yolo() {
     use xai_grok_workspace::permission::resolution::ManagedSettingsFeatures;
     let mut cfg = crate::agent::config::Config::default();
-    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
+    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
     cfg.features.feedback = Some(true);
     cfg.ui.yolo = true;
     cfg.default_yolo_mode = true;

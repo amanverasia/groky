@@ -1064,10 +1064,15 @@ fn apply_requirements_inner(
     pin_feature!(voice_mode);
     pin_requirement_only!(remote_fetch);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {
-        config.requirements.trace_upload.pin(val, source.clone());
-        if config.telemetry.trace_upload != Some(val) {
-            config.telemetry.trace_upload = Some(val);
-            push("telemetry.trace_upload", format!("{val}"));
+        // Trace upload is removed; resolution always returns disabled. Pin
+        // `false` (never the raw admin value) so the pin matches behavior,
+        // and only record enforcement when the requirement asked for `true`.
+        config.requirements.trace_upload.pin(false, source.clone());
+        if val {
+            push(
+                "telemetry.trace_upload",
+                "requirement ignored: trace upload removed".to_owned(),
+            );
         }
     }
     enforce_opt!("cli", "auto_update", config.cli.auto_update);
@@ -1159,11 +1164,6 @@ fn apply_requirements_inner(
     }
     enforce_str!(
         "endpoints",
-        "trace_upload_url",
-        config.endpoints.trace_upload_url
-    );
-    enforce_str!(
-        "endpoints",
         "feedback_base_url",
         config.endpoints.feedback_base_url
     );
@@ -1171,50 +1171,6 @@ fn apply_requirements_inner(
         "endpoints",
         "deployment_key",
         config.endpoints.deployment_key,
-        redacted
-    );
-    enforce_str!("telemetry", "events_url", config.telemetry.events_url);
-    enforce_str!(
-        "telemetry",
-        "events_api_key",
-        config.telemetry.events_api_key,
-        redacted
-    );
-    enforce_val!(
-        "telemetry",
-        "mixpanel_enabled",
-        config.telemetry.mixpanel_enabled
-    );
-    enforce_str!(
-        "telemetry",
-        "mixpanel_token",
-        config.telemetry.mixpanel_token,
-        redacted
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_bucket",
-        config.endpoints.trace_upload_bucket
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_region",
-        config.endpoints.trace_upload_region
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials_file",
-        config.endpoints.trace_upload_credentials_file
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_endpoint_url",
-        config.endpoints.trace_upload_endpoint_url
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials",
-        config.endpoints.trace_upload_credentials,
         redacted
     );
     if let Some(val) = req.get("features").and_then(|f| f.get("codebase_indexing")) {

@@ -29,7 +29,7 @@ mod tests {
     use super::*;
 
     // NOTE: relies on no test in this binary installing a *global* subscriber
-    // (`OtelTestEnv` and friends use thread-scoped `set_default` guards).
+    // (tests here use thread-scoped `with_default` / `set_default` guards).
     #[test]
     fn without_dispatcher_inactive() {
         assert!(!dispatcher_active());

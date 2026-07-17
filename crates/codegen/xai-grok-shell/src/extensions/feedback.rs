@@ -5,8 +5,8 @@
 //!   forward to cli-chat-proxy.
 //! - `btw`: dispatch a side question to the active session via
 //!   `SessionCommand::SideQuestion` and return the answer.
-//! - `review/comment` and `review/comment/delete`: record inline code review
-//!   events to cloud storage.
+//! - `review/comment` and `review/comment/delete`: acknowledge inline code
+//!   review events (local logging only; diagnostic uploads removed).
 
 use std::sync::Arc;
 
@@ -20,8 +20,6 @@ use crate::session::{
     ClientFeedbackInput, CommentDeleteRequest, CommentDeleteResponse, CommentRequest,
     CommentResponse, FeedbackRequestDismiss, FeedbackResponse, SessionCommand,
 };
-use crate::upload::gcs::WithAuth as _;
-use xai_file_utils::gcs::upload_bytes;
 use xai_grok_telemetry::id::agent_id;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
@@ -209,23 +207,6 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 );
             }
 
-            // Point to the per-turn unified log already uploaded by
-            // complete_prompt_trace. Only set the URL when trace uploads
-            // are active — otherwise the cloud storage object won't exist.
-            if agent.trace_upload_config().await.is_some()
-                && let Some(tn) = turn_number
-            {
-                let bucket_url = {
-                    let cfg = agent.cfg.borrow();
-                    cfg.endpoints.resolve_trace_bucket_url().map(|r| r.value)
-                };
-                submission.unified_log_url = crate::upload::gcs::unified_log_url(
-                    bucket_url.as_deref(),
-                    &feedback_input.session_id,
-                    tn,
-                );
-            }
-
             let telemetry_enabled = {
                 let cfg = agent.cfg.borrow();
                 cfg.is_telemetry_enabled()
@@ -357,8 +338,8 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
 /// Record inline code review events.
 ///
 /// Methods:
-/// - `x.ai/review/comment`: record a new inline code comment to cloud storage
-/// - `x.ai/review/comment/delete`: record a tombstone event for a deleted comment
+/// - `x.ai/review/comment`: acknowledge a new inline code comment
+/// - `x.ai/review/comment/delete`: acknowledge deletion of a comment
 async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/review/comment" => {
@@ -386,38 +367,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 "clientType": format!("{:?}", agent.client_type()),
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             });
-
-            if let Some(gcs_config) = agent
-                .build_gcs_config(format!("{}/comments", request.session_id))
-                .await
-            {
-                let json_bytes = serde_json::to_vec_pretty(&record)
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-                let gcs_path = format!(
-                    "{}/{}.json",
-                    gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
-                    comment_id
-                );
-
-                let auth_manager = Some(agent.auth_manager.clone());
-                tokio::spawn(async move {
-                    match upload_bytes(
-                        &gcs_config.with_auth(auth_manager),
-                        &gcs_path,
-                        &json_bytes,
-                        "application/json",
-                    )
-                    .await
-                    {
-                        Ok(gcs_url) => {
-                            tracing::info!(gcs_url = %gcs_url, "Comment uploaded to GCS");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, gcs_path, "Failed to upload comment to GCS");
-                        }
-                    }
-                });
-            }
+            tracing::debug!(record = %record, "review comment recorded locally (uploads removed)");
 
             let value = serde_json::to_value(CommentResponse {
                 comment_id,
@@ -445,39 +395,7 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 "clientType": format!("{:?}", agent.client_type()),
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             });
-
-            if let Some(gcs_config) = agent
-                .build_gcs_config(format!("{}/comments", request.session_id))
-                .await
-            {
-                let json_bytes = serde_json::to_vec_pretty(&record)
-                    .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-                let event_id = uuid::Uuid::now_v7().to_string();
-                let gcs_path = format!(
-                    "{}/{}.json",
-                    gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
-                    event_id
-                );
-
-                let auth_manager = Some(agent.auth_manager.clone());
-                tokio::spawn(async move {
-                    match upload_bytes(
-                        &gcs_config.with_auth(auth_manager),
-                        &gcs_path,
-                        &json_bytes,
-                        "application/json",
-                    )
-                    .await
-                    {
-                        Ok(gcs_url) => {
-                            tracing::info!(gcs_url = %gcs_url, "Comment delete event uploaded to GCS");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, gcs_path, "Failed to upload comment delete event to GCS");
-                        }
-                    }
-                });
-            }
+            tracing::debug!(record = %record, "review comment delete recorded locally (uploads removed)");
 
             let value = serde_json::to_value(CommentDeleteResponse {
                 comment_id: request.comment_id,

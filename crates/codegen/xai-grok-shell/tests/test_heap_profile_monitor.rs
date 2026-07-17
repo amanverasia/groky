@@ -1,27 +1,22 @@
 //! Integration tests: jemalloc heap-profile monitor against mock
-//! `/v1/settings` + `/v1/storage` (xai-grok-test-support).
+//! `/v1/settings` (xai-grok-test-support).
 //!
-//! Fake hooks inject controllable `stats.resident` crossings. Real
-//! `gcs::upload_file` proxy uploads hit the mock storage endpoint.
+//! Fake hooks inject controllable `stats.resident` crossings. Dumps are
+//! persisted to a local directory (remote uploads were removed).
 //!
 //! ```bash
 //! cargo test -p xai-grok-shell --test test_heap_profile_monitor
 //! ```
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use chrono::{Duration as ChronoDuration, Utc};
-use xai_grok_shell::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 use xai_grok_shell::heap_profile::{
-    self, HeapProfileHooks, HeapProfileMonitor, HeapProfileUploadHandles,
-    JemallocHeapProfileConfig, JemallocStats, build_upload_handles, is_valid_session_id,
-    object_paths, resolve_jemalloc_heap_profile, sanitize_version,
+    self, HeapProfileHooks, HeapProfileMonitor, JemallocHeapProfileConfig, JemallocStats,
+    is_valid_session_id, object_paths, resolve_jemalloc_heap_profile, sanitize_version,
 };
-use xai_grok_shell::session::repo_changes::UploadMethod;
 use xai_grok_shell::util::config::RemoteSettings;
 use xai_grok_test_support::{EnvGuard, MockInferenceServer};
 use xai_grok_version::TEST_VERSION_ENV;
@@ -29,8 +24,6 @@ use xai_grok_version::TEST_VERSION_ENV;
 const SID: &str = "11111111-1111-4111-8111-111111111111";
 const TEST_VERSION: &str = "9.9.9-heaptest";
 const DUMP_PAYLOAD: u64 = 4096;
-const AUTH_TOKEN: &str = "heap-profile-test-bearer";
-const AUTH_BEARER: &str = "Bearer heap-profile-test-bearer";
 
 static HOOKS_INIT: Once = Once::new();
 static FAKE_ALLOCATED: AtomicU64 = AtomicU64::new(1_000);
@@ -90,7 +83,6 @@ fn settings(enabled: bool, thresholds: &[u64]) -> RemoteSettings {
         jemalloc_heap_profile_enabled: Some(enabled),
         jemalloc_heap_profile_thresholds_bytes: Some(thresholds.to_vec()),
         jemalloc_heap_profile_poll_interval_secs: Some(5),
-        trace_upload_enabled: Some(true),
         ..Default::default()
     }
 }
@@ -109,39 +101,7 @@ fn resolve_from_settings(settings: &RemoteSettings) -> JemallocHeapProfileConfig
         settings.jemalloc_heap_profile_thresholds_bytes.as_deref(),
         settings.jemalloc_heap_profile_poll_interval_secs,
         false,
-        settings.trace_upload_enabled == Some(true),
         heap_profile::prof_available(),
-    )
-}
-
-fn seed_auth_json(home: &Path, token: &str) {
-    let scope = GrokComConfig::default().auth_scope();
-    let auth = GrokAuth {
-        key: token.to_owned(),
-        auth_mode: AuthMode::ApiKey,
-        create_time: Utc::now(),
-        user_id: "heap-profile-test".into(),
-        expires_at: Some(Utc::now() + ChronoDuration::hours(2)),
-        ..Default::default()
-    };
-    let store = serde_json::json!({ scope: auth });
-    std::fs::write(
-        home.join("auth.json"),
-        serde_json::to_vec(&store).expect("serialize auth.json"),
-    )
-    .expect("write auth.json");
-}
-
-fn proxy_handles(server: &MockInferenceServer, auth: Arc<AuthManager>) -> HeapProfileUploadHandles {
-    build_upload_handles(
-        auth,
-        Some("gs://mock-bucket".to_owned()),
-        UploadMethod::Proxy {
-            proxy_base_url: server.url(),
-            user_token: String::new(),
-            deployment_key: None,
-            alpha_test_key: None,
-        },
     )
 }
 
@@ -169,17 +129,6 @@ fn assert_jemalloc_object_pair(sid: &str, version: &str, heap: &str, meta: &str)
     let (expected_heap, expected_meta) = object_paths(sid, version, ts);
     assert_eq!(heap, expected_heap);
     assert_eq!(meta, expected_meta);
-}
-
-fn assert_storage_auth(uploads: &[xai_grok_test_support::mock_server::StorageUpload]) {
-    for u in uploads {
-        assert_eq!(
-            u.authorization.as_deref(),
-            Some(AUTH_BEARER),
-            "storage upload {:?} missing live AuthManager bearer",
-            u.path
-        );
-    }
 }
 
 fn assert_meta_json(body: &[u8], threshold: u64, resident: u64, allocated: u64) {
@@ -222,11 +171,17 @@ async fn wait_for_next_unix_second() {
         .expect("wait_for_next_unix_second: wall clock did not advance within 3s");
 }
 
+/// A profile persisted under the local persist dir.
+struct PersistedProfile {
+    /// Relative object path (`{sid}/jemalloc/...`), `/`-separated.
+    path: String,
+    body: Vec<u8>,
+}
+
 struct Harness {
     server: MockInferenceServer,
     mon: HeapProfileMonitor,
-    auth: Arc<AuthManager>,
-    _home: tempfile::TempDir,
+    persist_dir: tempfile::TempDir,
     _version: EnvGuard,
 }
 
@@ -241,18 +196,15 @@ impl Harness {
         server.set_settings(&remote);
         let fetched = fetch_settings(&server).await;
         let config = resolve_from_settings(&fetched);
-        let home = tempfile::TempDir::new().expect("temp home");
-        seed_auth_json(home.path(), AUTH_TOKEN);
-        let auth = Arc::new(AuthManager::new(home.path(), GrokComConfig::default()));
-        let handles = proxy_handles(&server, Arc::clone(&auth));
+        let persist_dir = tempfile::TempDir::new().expect("persist dir");
         let mut mon = HeapProfileMonitor::new();
-        mon.reconfigure(config, Some(handles));
+        mon.set_persist_dir(persist_dir.path().to_path_buf());
+        mon.reconfigure(config);
         mon.set_session_id(SID.to_owned());
         Self {
             server,
             mon,
-            auth,
-            _home: home,
+            persist_dir,
             _version,
         }
     }
@@ -260,38 +212,64 @@ impl Harness {
     async fn reconfigure_from_server(&mut self) {
         let fetched = fetch_settings(&self.server).await;
         let config = resolve_from_settings(&fetched);
-        let handles = proxy_handles(&self.server, Arc::clone(&self.auth));
-        self.mon.reconfigure(config, Some(handles));
+        self.mon.reconfigure(config);
+    }
+
+    /// All persisted profiles sorted by (mtime-independent) path order —
+    /// timestamps in the leaf name give chronological order.
+    fn persisted(&self) -> Vec<PersistedProfile> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<PersistedProfile>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.is_file() {
+                    let rel: PathBuf = path.strip_prefix(root).expect("under root").to_path_buf();
+                    out.push(PersistedProfile {
+                        path: rel
+                            .components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join("/"),
+                        body: std::fs::read(&path).expect("read persisted file"),
+                    });
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.persist_dir.path(), self.persist_dir.path(), &mut out);
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
     }
 }
 
 #[tokio::test]
 #[serial_test::serial(heap_profile_integration)]
-async fn mock_settings_enable_threshold_upload_hits_storage_with_object_paths() {
+async fn mock_settings_enable_threshold_persists_locally_with_object_paths() {
     let mut h = Harness::start(settings(true, &[1_000])).await;
     assert!(h.mon.config().enabled);
     assert!(FAKE_PROF_ACTIVE.load(Ordering::Relaxed));
-    assert_eq!(h.server.storage_request_count(), 0);
+    assert!(h.persisted().is_empty());
 
     FAKE_RESIDENT.store(2_000, Ordering::Relaxed);
     h.mon.poll_tick().await;
 
     assert!(h.mon.latched().contains(&1_000));
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 1);
-    assert_eq!(h.server.storage_request_count(), 2);
 
-    let uploads = h.server.storage_uploads();
-    assert_eq!(uploads.len(), 2);
-    assert_eq!(uploads[0].size, DUMP_PAYLOAD as usize);
-    assert_eq!(uploads[0].body.len(), DUMP_PAYLOAD as usize);
-    assert!(uploads[0].body.iter().all(|&b| b == 0xAB));
-    assert_jemalloc_object_pair(SID, TEST_VERSION, &uploads[0].path, &uploads[1].path);
-    assert_storage_auth(&uploads);
-    assert_meta_json(&uploads[1].body, 1_000, 2_000, 1_000);
+    let files = h.persisted();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].body.len(), DUMP_PAYLOAD as usize);
+    assert!(files[0].body.iter().all(|&b| b == 0xAB));
+    assert_jemalloc_object_pair(SID, TEST_VERSION, &files[0].path, &files[1].path);
+    assert_meta_json(&files[1].body, 1_000, 2_000, 1_000);
 
     h.mon.poll_tick().await;
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 1);
-    assert_eq!(h.server.storage_request_count(), 2);
+    assert_eq!(h.persisted().len(), 2);
 }
 
 #[tokio::test]
@@ -303,7 +281,7 @@ async fn mock_settings_disable_stops_sampling_and_further_dumps() {
     FAKE_RESIDENT.store(600, Ordering::Relaxed);
     h.mon.poll_tick().await;
     assert!(h.mon.latched().contains(&500));
-    assert_eq!(h.server.storage_uploads().len(), 2);
+    assert_eq!(h.persisted().len(), 2);
     let dumps_after_first = FAKE_DUMP_COUNT.load(Ordering::Relaxed);
     assert_eq!(dumps_after_first, 1);
 
@@ -318,7 +296,7 @@ async fn mock_settings_disable_stops_sampling_and_further_dumps() {
     FAKE_RESIDENT.store(10_000, Ordering::Relaxed);
     h.mon.poll_tick().await;
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), dumps_after_first);
-    assert_eq!(h.server.storage_uploads().len(), 2);
+    assert_eq!(h.persisted().len(), 2);
     assert!(!h.mon.latched().contains(&2_000));
 }
 
@@ -334,24 +312,7 @@ async fn mock_settings_off_from_start_never_dumps() {
 
     assert!(h.mon.latched().is_empty());
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 0);
-    assert_eq!(h.server.storage_request_count(), 0);
-    assert!(h.server.storage_uploads().is_empty());
-}
-
-#[tokio::test]
-#[serial_test::serial(heap_profile_integration)]
-async fn storage_unauthorized_latches_without_accepted_upload() {
-    let mut h = Harness::start(settings(true, &[100])).await;
-    h.server.set_storage_unauthorized(true);
-
-    FAKE_RESIDENT.store(200, Ordering::Relaxed);
-    h.mon.poll_tick().await;
-
-    assert!(h.mon.latched().contains(&100));
-    // Heap upload fails (401); meta is not attempted (no orphan .meta.json).
-    assert_eq!(h.server.storage_request_count(), 1);
-    assert!(h.server.storage_uploads().is_empty());
-    assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 1);
+    assert!(h.persisted().is_empty());
 }
 
 #[tokio::test]
@@ -364,53 +325,37 @@ async fn empty_thresholds_from_settings_stay_disabled() {
     FAKE_RESIDENT.store(u64::MAX, Ordering::Relaxed);
     h.mon.poll_tick().await;
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 0);
-    assert_eq!(h.server.storage_request_count(), 0);
+    assert!(h.persisted().is_empty());
 }
 
 #[tokio::test]
 #[serial_test::serial(heap_profile_integration)]
-async fn trace_upload_disabled_keeps_monitor_off() {
-    let mut remote = settings(true, &[100]);
-    remote.trace_upload_enabled = Some(false);
-    let mut h = Harness::start(remote).await;
-    assert!(!h.mon.config().enabled);
-    assert!(!FAKE_PROF_ACTIVE.load(Ordering::Relaxed));
-
-    FAKE_RESIDENT.store(u64::MAX, Ordering::Relaxed);
-    h.mon.poll_tick().await;
-    assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 0);
-    assert_eq!(h.server.storage_request_count(), 0);
-}
-
-#[tokio::test]
-#[serial_test::serial(heap_profile_integration)]
-async fn multi_threshold_uploads_unique_paths_in_order() {
+async fn multi_threshold_persists_unique_paths_in_order() {
     let mut h = Harness::start(settings(true, &[100, 200])).await;
 
     FAKE_RESIDENT.store(500, Ordering::Relaxed);
     h.mon.poll_tick().await;
     assert!(h.mon.latched().contains(&100));
     assert!(!h.mon.latched().contains(&200));
-    assert_eq!(h.server.storage_uploads().len(), 2);
+    assert_eq!(h.persisted().len(), 2);
 
     wait_for_next_unix_second().await;
     h.mon.poll_tick().await;
     assert!(h.mon.latched().contains(&200));
-    let uploads = h.server.storage_uploads();
-    assert_eq!(uploads.len(), 4);
+    let files = h.persisted();
+    assert_eq!(files.len(), 4);
 
-    assert_jemalloc_object_pair(SID, TEST_VERSION, &uploads[0].path, &uploads[1].path);
-    assert_jemalloc_object_pair(SID, TEST_VERSION, &uploads[2].path, &uploads[3].path);
-    assert_ne!(uploads[0].path, uploads[2].path);
-    assert_ne!(uploads[1].path, uploads[3].path);
-    assert_storage_auth(&uploads);
-    assert_meta_json(&uploads[1].body, 100, 500, 1_000);
-    assert_meta_json(&uploads[3].body, 200, 500, 1_000);
+    assert_jemalloc_object_pair(SID, TEST_VERSION, &files[0].path, &files[1].path);
+    assert_jemalloc_object_pair(SID, TEST_VERSION, &files[2].path, &files[3].path);
+    assert_ne!(files[0].path, files[2].path);
+    assert_ne!(files[1].path, files[3].path);
+    assert_meta_json(&files[1].body, 100, 500, 1_000);
+    assert_meta_json(&files[3].body, 200, 500, 1_000);
 }
 
 #[tokio::test]
 #[serial_test::serial(heap_profile_integration)]
-async fn below_threshold_does_not_touch_storage() {
+async fn below_threshold_does_not_persist() {
     let mut h = Harness::start(settings(true, &[10_000])).await;
     assert!(FAKE_PROF_ACTIVE.load(Ordering::Relaxed));
 
@@ -419,12 +364,12 @@ async fn below_threshold_does_not_touch_storage() {
 
     assert!(h.mon.latched().is_empty());
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 0);
-    assert_eq!(h.server.storage_request_count(), 0);
+    assert!(h.persisted().is_empty());
 }
 
 #[tokio::test]
 #[serial_test::serial(heap_profile_integration)]
-async fn exact_threshold_triggers_dump_and_upload() {
+async fn exact_threshold_triggers_dump_and_persist() {
     let mut h = Harness::start(settings(true, &[10_000])).await;
 
     FAKE_RESIDENT.store(10_000, Ordering::Relaxed);
@@ -432,17 +377,15 @@ async fn exact_threshold_triggers_dump_and_upload() {
 
     assert!(h.mon.latched().contains(&10_000));
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 1);
-    assert_eq!(h.server.storage_request_count(), 2);
-    let uploads = h.server.storage_uploads();
-    assert_eq!(uploads.len(), 2);
-    assert_jemalloc_object_pair(SID, TEST_VERSION, &uploads[0].path, &uploads[1].path);
-    assert_storage_auth(&uploads);
-    assert_meta_json(&uploads[1].body, 10_000, 10_000, 1_000);
+    let files = h.persisted();
+    assert_eq!(files.len(), 2);
+    assert_jemalloc_object_pair(SID, TEST_VERSION, &files[0].path, &files[1].path);
+    assert_meta_json(&files[1].body, 10_000, 10_000, 1_000);
 }
 
 #[tokio::test]
 #[serial_test::serial(heap_profile_integration)]
-async fn dump_failure_latches_without_storage_hit() {
+async fn dump_failure_latches_without_persisting() {
     let mut h = Harness::start(settings(true, &[100])).await;
     FAKE_DUMP_FAIL.store(true, Ordering::Relaxed);
     FAKE_RESIDENT.store(200, Ordering::Relaxed);
@@ -450,8 +393,7 @@ async fn dump_failure_latches_without_storage_hit() {
 
     assert!(h.mon.latched().contains(&100));
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 1);
-    assert_eq!(h.server.storage_request_count(), 0);
-    assert!(h.server.storage_uploads().is_empty());
+    assert!(h.persisted().is_empty());
 }
 
 #[tokio::test]
@@ -461,7 +403,7 @@ async fn re_enable_after_kill_switch_keeps_prior_latches() {
     FAKE_RESIDENT.store(150, Ordering::Relaxed);
     h.mon.poll_tick().await;
     assert!(h.mon.latched().contains(&100));
-    assert_eq!(h.server.storage_uploads().len(), 2);
+    assert_eq!(h.persisted().len(), 2);
 
     h.server.set_settings(settings(false, &[100, 200]));
     h.reconfigure_from_server().await;
@@ -469,7 +411,7 @@ async fn re_enable_after_kill_switch_keeps_prior_latches() {
 
     FAKE_RESIDENT.store(500, Ordering::Relaxed);
     h.mon.poll_tick().await;
-    assert_eq!(h.server.storage_uploads().len(), 2);
+    assert_eq!(h.persisted().len(), 2);
 
     h.server.set_settings(settings(true, &[100, 200]));
     h.reconfigure_from_server().await;
@@ -480,10 +422,9 @@ async fn re_enable_after_kill_switch_keeps_prior_latches() {
     h.mon.poll_tick().await;
     assert!(h.mon.latched().contains(&100));
     assert!(h.mon.latched().contains(&200));
-    assert_eq!(h.server.storage_uploads().len(), 4);
+    let files = h.persisted();
+    assert_eq!(files.len(), 4);
     assert_eq!(FAKE_DUMP_COUNT.load(Ordering::Relaxed), 2);
-    let uploads = h.server.storage_uploads();
-    assert_ne!(uploads[0].path, uploads[2].path);
-    assert_storage_auth(&uploads[2..]);
-    assert_meta_json(&uploads[3].body, 200, 500, 1_000);
+    assert_ne!(files[0].path, files[2].path);
+    assert_meta_json(&files[3].body, 200, 500, 1_000);
 }

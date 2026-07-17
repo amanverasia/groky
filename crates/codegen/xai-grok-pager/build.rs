@@ -1,7 +1,25 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // Watch the real git HEAD so version info refreshes on new commits.
+    // The path must exist: cargo treats a missing rerun-if-changed file as
+    // permanently dirty, which forces this crate (and every dependent) to
+    // rebuild on every invocation. `--git-path` resolves correctly for both
+    // normal checkouts and linked worktrees.
+    let head_path = Command::new("git")
+        .args(["rev-parse", "--git-path", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|p| !p.is_empty() && std::path::Path::new(p).exists());
+    match head_path {
+        Some(path) => println!("cargo:rerun-if-changed={path}"),
+        // Not a git checkout (e.g. release tarball): only rerun when the
+        // build script itself changes.
+        None => println!("cargo:rerun-if-changed=build.rs"),
+    }
     println!("cargo:rerun-if-env-changed=GROK_VERSION");
 
     let commit = Command::new("git")

@@ -126,26 +126,8 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
         .with(fmt_layer.with_filter(env_filter))
         .with(xai_grok_telemetry::sampling_log::layer())
         .with(xai_grok_telemetry::instrumentation::layer())
-        .with(xai_grok_telemetry::hooks_log::layer())
-        .with(xai_grok_telemetry::otel_layer::build_otel_layer(
-            xai_grok_telemetry::otel_layer::OtelClientInfo {
-                client_name: "grok-pager",
-                client_version: xai_grok_version::VERSION,
-                service_version: env!("VERSION_WITH_COMMIT"),
-                app_entrypoint,
-            },
-            xai_grok_shell::auth::credential_provider::build_default_otel_layer_config(),
-        ));
+        .with(xai_grok_telemetry::hooks_log::layer());
     xai_grok_telemetry::debug_log::install_firehose(registry, app_entrypoint);
-    xai_grok_telemetry::external::init(
-        xai_grok_shell::agent::config::resolve_external_otel_config(
-            xai_grok_telemetry::external::config::ExternalClientInfo {
-                service_version: env!("VERSION_WITH_COMMIT").to_owned(),
-                client_version: xai_grok_version::VERSION.to_owned(),
-                app_entrypoint: app_entrypoint.to_owned(),
-            },
-        ),
-    );
 }
 /// `grok setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
@@ -940,8 +922,6 @@ async fn replay_acp_state_after_reconnect(
 /// The TUI has its own signal handler (`app::signal_handler`) that does the
 /// full crossterm teardown.
 fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
-    xai_grok_telemetry::sentry::flush_on_shutdown();
-    xai_grok_telemetry::otel_layer::shutdown_otel();
     xai_grok_telemetry::debug_log::flush();
     std::process::exit(exit_code);
 }
@@ -981,7 +961,6 @@ async fn run_agent_command(
         }
     });
     init_tracing_simple("agent");
-    let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
     xai_grok_telemetry::instrumentation::install_panic_hook();
     if trust {
         match std::env::current_dir() {
@@ -1602,12 +1581,6 @@ fn main() {
         );
         std::process::exit(2);
     }
-    let _sentry_guard = xai_grok_telemetry::sentry::init(xai_grok_telemetry::sentry::Config {
-        client: "grok-pager",
-        client_version: PAGER_CLIENT_VERSION,
-        release: env!("VERSION_WITH_COMMIT"),
-        disabled: xai_grok_shell::agent::config::is_error_reporting_disabled_sync(),
-    });
     xai_grok_pager::docs::extract_user_guide_docs(&xai_grok_shell::util::grok_home::grok_home());
     xai_crash_handler::install_terminal_restore_only();
     if xai_grok_shell::util::config::load_crash_handler_enabled_sync() {
@@ -1645,7 +1618,6 @@ fn main() {
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
         eprintln!("Error: {e:#}");
-        drop(_sentry_guard);
         std::process::exit(1);
     }
 }
@@ -1766,7 +1738,6 @@ async fn async_main() -> Result<()> {
             }
             Command::Setup { json } => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 run_setup_command(json).await;
                 return Ok(());
             }
@@ -1776,12 +1747,10 @@ async fn async_main() -> Result<()> {
             }
             Command::Plugin(plugin_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return xai_grok_pager::plugin_cmd::run(plugin_args).await;
             }
             Command::Models => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1790,12 +1759,10 @@ async fn async_main() -> Result<()> {
             }
             Command::Leader(leader_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return run_leader_mgmt(leader_args).await;
             }
             Command::Worktree(worktree_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1804,12 +1771,10 @@ async fn async_main() -> Result<()> {
             }
             Command::Workspace(workspace_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 return run_workspace_mgmt(workspace_args).await;
             }
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1818,7 +1783,6 @@ async fn async_main() -> Result<()> {
             }
             Command::Share(ref share_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1831,7 +1795,6 @@ async fn async_main() -> Result<()> {
             }
             Command::Trace(trace_args) => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let agent_config = AgentConfig::new_from_toml_cfg(&config)
@@ -1851,7 +1814,6 @@ async fn async_main() -> Result<()> {
                 enterprise,
             } => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let channel_switch = get_channel_switch(alpha, stable, enterprise);
                 return run_update_command(
                     check,
@@ -1870,7 +1832,6 @@ async fn async_main() -> Result<()> {
                 devbox,
             } => {
                 init_tracing_simple("cli");
-                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -1908,7 +1869,6 @@ async fn async_main() -> Result<()> {
     )?;
     if let Some(prompt) = headless_prompt {
         init_tracing_simple(HEADLESS_ENTRYPOINT);
-        let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
         enforce_minimum_version_or_exit(&update_config).await;
         let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
             args.yolo,
@@ -1973,7 +1933,6 @@ async fn async_main() -> Result<()> {
         .await;
     }
     enforce_minimum_version_or_exit(&update_config).await;
-    let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
     type UpdateWaitHandle = tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>;
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));

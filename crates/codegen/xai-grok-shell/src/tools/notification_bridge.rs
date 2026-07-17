@@ -58,17 +58,6 @@ pub struct NotificationBridgeConfig {
     /// Shared set of IDs delivered via auto-wake, used to suppress duplicate
     /// `TaskCompletionReminder` entries for the same task/subagent.
     pub auto_wake_delivered: xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds,
-    /// Channel for requesting trace uploads for synthetic auto-wake turns.
-    /// Wrapped in `Arc<Mutex<..>>` because the coordinator creates the channel
-    /// after the notification bridge is spawned — the bridge reads the latest
-    /// value on each notification.
-    pub(crate) synthetic_trace_tx: Arc<
-        std::sync::Mutex<
-            Option<
-                tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
-            >,
-        >,
-    >,
     /// Resolved name of the `BackgroundTaskAction` tool. Written exactly
     /// once after the agent's toolset is finalized; read many times
     /// thereafter from the notification bridge and the session actor's
@@ -389,13 +378,7 @@ async fn handle_notification(
                 let prompt_id = format!("task-completed-{task_id}");
                 let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(message))];
 
-                // Capture a pre-prompt session snapshot for the trace upload path.
-                let (before_copy_tx, before_copy_rx) = tokio::sync::oneshot::channel();
-                let _ = config.session_cmd_tx.send(SessionCommand::CopyFile {
-                    respond_to: before_copy_tx,
-                });
-
-                let (respond_to, completion_rx) = tokio::sync::oneshot::channel();
+                let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
                 tracing::info!(
                     task_id = %task_id,
                     prompt_id = %prompt_id,
@@ -413,7 +396,6 @@ async fn handle_notification(
                         prompt_id: prompt_id.clone(),
                         prompt_blocks,
                         prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-                        artifact_upload_ctx: None,
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
@@ -425,28 +407,6 @@ async fn handle_notification(
                         parsed_prompt_tx: None,
                     })
                     .is_ok();
-
-                if let Some(ref trace_tx) = *config
-                    .synthetic_trace_tx
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                {
-                    tracing::info!(
-                        task_id = %task_id,
-                        "auto-wake: sending synthetic turn trace request"
-                    );
-                    let _ = trace_tx.send(crate::upload::turn::SyntheticTurnTraceRequest {
-                        session_id: config.session_id.clone(),
-                        prompt_id,
-                        completion_rx,
-                        before_session_copy_rx: before_copy_rx,
-                    });
-                } else {
-                    tracing::debug!(
-                        task_id = %task_id,
-                        "auto-wake: no synthetic_trace_tx, skipping trace request"
-                    );
-                }
             } else {
                 // Auto-wake disabled — fall back to idle-gated notification drain.
                 let tool_name = resolved_tool_name(&config.task_output_tool_name);
@@ -852,7 +812,6 @@ mod tests {
             session_cmd_tx,
             auto_wake_delivered:
                 xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds::default(),
-            synthetic_trace_tx: Arc::new(std::sync::Mutex::new(None)),
             task_output_tool_name: Arc::new(std::sync::OnceLock::new()),
             read_tool_name: Arc::new(std::sync::OnceLock::new()),
             auto_wake_enabled: true,

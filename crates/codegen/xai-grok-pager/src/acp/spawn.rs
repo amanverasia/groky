@@ -42,10 +42,7 @@ pub async fn spawn_grok_shell(
         &grok_home(),
         agent_config.grok_com_config.clone(),
     ));
-    auth_manager.configure_refresher(
-        agent_config.grok_com_config.auth_provider_command.clone(),
-        None,
-    );
+    auth_manager.configure_refresher(agent_config.grok_com_config.auth_provider_command.clone());
     // Pause token refreshes across system sleep so an OIDC refresh can't
     // straddle a suspend (which can revoke the refresh token and force
     // re-login). No-op where the OS listener is unavailable.

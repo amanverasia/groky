@@ -16,29 +16,12 @@ pub use super::enums::PrCreationSource;
 /// Binds a product event name to a struct. Implement via `telemetry_event!` below.
 pub trait TelemetryEvent: Serialize + Send + 'static {
     const NAME: &'static str;
-
-    /// Curated external-OTEL representation (see [`crate::external`]).
-    /// Default: not exported externally. Override via the macro's
-    /// `external = …` arm — the mapping functions live together in
-    /// `external/schema.rs` so the whole wire schema is one reviewable file.
-    fn external_record(&self) -> Option<crate::external::schema::ExternalRecord> {
-        None
-    }
 }
 
 macro_rules! telemetry_event {
     ($struct:path, $name:literal) => {
         impl $crate::events::TelemetryEvent for $struct {
             const NAME: &'static str = $name;
-        }
-    };
-    ($struct:path, $name:literal, external = $mapper:path) => {
-        impl $crate::events::TelemetryEvent for $struct {
-            const NAME: &'static str = $name;
-
-            fn external_record(&self) -> Option<$crate::external::schema::ExternalRecord> {
-                $mapper(self)
-            }
         }
     };
 }
@@ -1394,29 +1377,6 @@ pub struct InternalError {
 // never exported externally)
 // ---------------------------------------------------------------------------
 
-/// Emitted once per process (post-auth) when the external OTEL stream is
-/// configured. Endpoint reduced to `scheme://host[:port]` — we measure
-/// adoption without learning collector details.
-#[derive(Serialize)]
-pub struct ExternalOtelConfigured {
-    pub metrics_exporter: String,
-    pub logs_exporter: String,
-    pub protocol: String,
-    pub logs_endpoint_origin: String,
-    pub metrics_endpoint_origin: String,
-    pub prompts_gate: bool,
-    pub details_gate: bool,
-    /// Startup source of the master switch: `env` | `config`.
-    pub source: String,
-}
-
-/// Remote (fleet) policy applied to the external stream mid-run.
-#[derive(Serialize)]
-pub struct ExternalOtelRemotePolicyApplied {
-    /// `force_disable` | `gates_locked`.
-    pub action: String,
-}
-
 /// Export-health counters for the external stream, emitted on the internal
 /// pipeline at shutdown (never externally — avoid feedback loops).
 #[derive(Serialize)]
@@ -1562,74 +1522,34 @@ pub struct ManualAuth {
 
 telemetry_event!(ManualAuth, "manual_auth");
 
-telemetry_event!(Login, "login", external = crate::external::schema::map_auth);
+telemetry_event!(Login, "login");
 telemetry_event!(LoginPickerShown, "login_picker_shown");
 telemetry_event!(LoginMethodChosen, "login_method_chosen");
 telemetry_event!(LoginCompleted, "login_completed");
 telemetry_event!(LoginFailed, "login_failed");
 telemetry_event!(LoginAbandoned, "login_abandoned");
 telemetry_event!(ApiKeySaveResult, "api_key_save_result");
-telemetry_event!(
-    PlanModeToggled,
-    "plan_mode_toggled",
-    external = crate::external::schema::map_plan_mode_toggled
-);
-telemetry_event!(
-    ContextualTip,
-    "contextual_tip",
-    external = crate::external::schema::map_contextual_tip
-);
+telemetry_event!(PlanModeToggled, "plan_mode_toggled");
+telemetry_event!(ContextualTip, "contextual_tip");
 telemetry_event!(PromptSuggestion, "prompt_suggestion");
-telemetry_event!(
-    YoloToggled,
-    "yolo_toggled",
-    external = crate::external::schema::map_yolo_toggled
-);
+telemetry_event!(YoloToggled, "yolo_toggled");
 telemetry_event!(SlashCommandUsed, "slash_command_used");
 telemetry_event!(PermissionPrompted, "permission_prompted");
-telemetry_event!(
-    PermissionDecisionPayload,
-    "permission_decision",
-    external = crate::external::schema::map_tool_decision
-);
+telemetry_event!(PermissionDecisionPayload, "permission_decision");
 telemetry_event!(AutoCompactFired, "auto_compact_fired");
 telemetry_event!(CompactionTriggered, "compaction_triggered");
-telemetry_event!(
-    CompactionCompleted,
-    "compaction_completed",
-    external = crate::external::schema::map_compaction
-);
+telemetry_event!(CompactionCompleted, "compaction_completed");
 telemetry_event!(AutoCompactSuppressed, "auto_compact_suppressed");
 telemetry_event!(CompactionRetryDegraded, "compaction_retry_degraded");
-telemetry_event!(
-    SubagentLaunched,
-    "subagent_launched",
-    external = crate::external::schema::map_subagent_launched
-);
-telemetry_event!(
-    SubagentCompleted,
-    "subagent_completed",
-    external = crate::external::schema::map_subagent_completed
-);
-telemetry_event!(
-    ModelSwitched,
-    "model_switched",
-    external = crate::external::schema::map_model_switched
-);
+telemetry_event!(SubagentLaunched, "subagent_launched");
+telemetry_event!(SubagentCompleted, "subagent_completed");
+telemetry_event!(ModelSwitched, "model_switched");
 telemetry_event!(PluginAdded, "plugin_added");
 telemetry_event!(PluginRemoved, "plugin_removed");
-telemetry_event!(
-    PluginInstalled,
-    "plugin_installed",
-    external = crate::external::schema::map_plugin_installed
-);
+telemetry_event!(PluginInstalled, "plugin_installed");
 telemetry_event!(PluginUninstalled, "plugin_uninstalled");
 telemetry_event!(PluginReloaded, "plugin_reloaded");
-telemetry_event!(
-    PluginUsed,
-    "plugin_used",
-    external = crate::external::schema::map_plugin_used
-);
+telemetry_event!(PluginUsed, "plugin_used");
 telemetry_event!(PluginCtaImpression, "plugin_cta_impression");
 telemetry_event!(PluginCtaConnectClicked, "plugin_cta_connect_clicked");
 telemetry_event!(PluginCtaDismissed, "plugin_cta_dismissed");
@@ -1644,39 +1564,15 @@ telemetry_event!(HookBlocked, "hook_blocked");
 telemetry_event!(ClientHookGate, "client_hook_gate");
 telemetry_event!(SkillAdded, "skill_added");
 telemetry_event!(SkillRemoved, "skill_removed");
-telemetry_event!(
-    SkillDispatched,
-    "skill_dispatched",
-    external = crate::external::schema::map_skill_activated
-);
-telemetry_event!(
-    McpServerConnected,
-    "mcp_server_connected",
-    external = crate::external::schema::map_mcp_server_connected
-);
-telemetry_event!(
-    McpServerFailed,
-    "mcp_server_failed",
-    external = crate::external::schema::map_mcp_server_failed
-);
+telemetry_event!(SkillDispatched, "skill_dispatched");
+telemetry_event!(McpServerConnected, "mcp_server_connected");
+telemetry_event!(McpServerFailed, "mcp_server_failed");
 telemetry_event!(McpInitCompleted, "mcp_init_completed");
 telemetry_event!(McpToolCalled, "mcp_tool_called");
-telemetry_event!(
-    SessionHarness,
-    "session_harness",
-    external = crate::external::schema::map_session_start
-);
+telemetry_event!(SessionHarness, "session_harness");
 telemetry_event!(SessionLoad, "session_load");
-telemetry_event!(
-    SessionNew,
-    "session_new",
-    external = crate::external::schema::map_session_new
-);
-telemetry_event!(
-    PromptSubmitted,
-    "prompt_submitted",
-    external = crate::external::schema::map_user_prompt
-);
+telemetry_event!(SessionNew, "session_new");
+telemetry_event!(PromptSubmitted, "prompt_submitted");
 telemetry_event!(UserFeedback, "user_feedback");
 telemetry_event!(RolloutSurvey, "rollout_survey");
 telemetry_event!(PrCreated, "pr_created");
@@ -1687,28 +1583,12 @@ telemetry_event!(MultiAgentDiscard, "multi_agent_discard");
 telemetry_event!(RepoChanges, "repo_changes");
 telemetry_event!(NonGitDecisionEvent, "non_git_decision");
 telemetry_event!(PromptLatency, "prompt_latency");
-telemetry_event!(
-    TurnCompleted,
-    "turn_completed",
-    external = crate::external::schema::map_turn_completed
-);
-telemetry_event!(
-    ToolCallCompleted,
-    "tool_call_completed",
-    external = crate::external::schema::map_tool_result
-);
-telemetry_event!(
-    ModelResponseReceived,
-    "model_response_received",
-    external = crate::external::schema::map_api_request
-);
+telemetry_event!(TurnCompleted, "turn_completed");
+telemetry_event!(ToolCallCompleted, "tool_call_completed");
+telemetry_event!(ModelResponseReceived, "model_response_received");
 telemetry_event!(MemoryFlushed, "memory_flushed");
 telemetry_event!(MediaGenerated, "media_generated");
-telemetry_event!(
-    SessionEnded,
-    "session_ended",
-    external = crate::external::schema::map_session_end
-);
+telemetry_event!(SessionEnded, "session_ended");
 telemetry_event!(PagerSlashCommand, "pager_slash_command");
 telemetry_event!(PlanSubmit, "plan_submit");
 telemetry_event!(ProjectPickerSelected, "project_picker_selected");
@@ -1727,30 +1607,13 @@ telemetry_event!(DashboardOpened, "dashboard_opened");
 telemetry_event!(DashboardClosed, "dashboard_closed");
 telemetry_event!(DashboardAgentAttached, "dashboard_agent_attached");
 telemetry_event!(DashboardAgentLaunched, "dashboard_agent_launched");
-telemetry_event!(
-    RateLimitHit,
-    "rate_limit_hit",
-    external = crate::external::schema::map_rate_limit_hit
-);
+telemetry_event!(RateLimitHit, "rate_limit_hit");
 telemetry_event!(CreditLimitHit, "credit_limit_hit");
 telemetry_event!(CreditLimitUpsellShown, "credit_limit_upsell_shown");
 telemetry_event!(CreditLimitUpsellClicked, "credit_limit_upsell_clicked");
 telemetry_event!(SubscriptionActivated, "subscription_activated");
-telemetry_event!(
-    ApiError,
-    "api_error",
-    external = crate::external::schema::map_api_error
-);
-telemetry_event!(
-    InternalError,
-    "internal_error",
-    external = crate::external::schema::map_internal_error
-);
-telemetry_event!(ExternalOtelConfigured, "external_otel_configured");
-telemetry_event!(
-    ExternalOtelRemotePolicyApplied,
-    "external_otel_remote_policy_applied"
-);
+telemetry_event!(ApiError, "api_error");
+telemetry_event!(InternalError, "internal_error");
 telemetry_event!(ExternalOtelExportHealth, "external_otel_export_health");
 
 // Session lifecycle (structs in session_metrics)
@@ -1763,22 +1626,6 @@ telemetry_event!(
 telemetry_event!(
     crate::session_metrics::DoomLoopRecovery,
     "doom_loop_recovery"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadAttempted,
-    "trace_upload_attempted"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadSucceeded,
-    "trace_upload_succeeded"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadSkipped,
-    "trace_upload_skipped"
-);
-telemetry_event!(
-    crate::session_metrics::TraceUploadFailed,
-    "trace_upload_failed"
 );
 
 // Memory subsystem (structs in memory_telemetry)

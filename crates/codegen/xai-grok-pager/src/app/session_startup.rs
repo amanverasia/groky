@@ -420,10 +420,7 @@ pub(crate) fn pre_acp_auth_manager(
         &xai_grok_shell::util::grok_home::grok_home(),
         agent_config.grok_com_config.clone(),
     ));
-    auth.configure_refresher(
-        agent_config.grok_com_config.auth_provider_command.clone(),
-        None,
-    );
+    auth.configure_refresher(agent_config.grok_com_config.auth_provider_command.clone());
     auth
 }
 /// Preflight: preferred id must be a UUID and not a persisted session under `cwd`.

@@ -16,9 +16,13 @@ use std::time::Duration;
 
 use super::search_fts::SessionSearchIndex;
 
-/// GCS bucket for session search index sync (same as session traces);
+/// GCS bucket for session search index sync;
 /// `None` makes remote sync a no-op.
-const SEARCH_INDEX_BUCKET: Option<&str> = crate::upload::gcs::SESSION_TRACES_BUCKET;
+///
+/// The env var name is a legacy of the removed trace-upload pipeline, but it
+/// is a compile-time (`option_env!`) knob injected by the external release
+/// build environment, so the name is load-bearing and kept as-is.
+const SEARCH_INDEX_BUCKET: Option<&str> = option_env!("GROK_SESSION_TRACES_BUCKET_DEFAULT");
 
 /// GCS object name for the compressed index.
 const REMOTE_INDEX_OBJECT: &str = "session_search.sqlite.zst";
@@ -387,14 +391,14 @@ async fn download_index_inner(
 
 // Proxy helpers
 
-/// Extension trait on `TraceExportConfigWithAuth` to expose `proxy_http_client`
+/// Extension trait on `StorageExportConfigWithAuth` to expose `proxy_http_client`
 /// for download. This works because the upload gcs module already implements
 /// `StorageConfig` for the wrapper type.
 trait ProxyHttpClient {
     fn proxy_http_client(&self) -> Option<reqwest::Client>;
 }
 
-impl ProxyHttpClient for crate::upload::gcs::TraceExportConfigWithAuth {
+impl ProxyHttpClient for crate::upload::gcs::StorageExportConfigWithAuth {
     fn proxy_http_client(&self) -> Option<reqwest::Client> {
         <Self as xai_file_utils::gcs::StorageConfig>::proxy_http_client(self)
     }

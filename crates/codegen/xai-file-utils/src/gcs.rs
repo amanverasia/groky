@@ -51,7 +51,7 @@ fn build_proxy_client_with_fallback(
 /// Implement `StorageConfig` for `TraceExportConfig`. Lives here (alongside the
 /// trait + upload helpers) so callers can use the shared upload helpers without
 /// a foreign-trait impl. Refresh-aware callers still get credential /
-/// attribution wiring via `TraceExportConfigWithAuth` (in shell).
+/// attribution wiring via `StorageExportConfigWithAuth` (in shell).
 impl StorageConfig for crate::TraceExportConfig {
     fn bucket_url(&self) -> &str {
         // For proxy mode, bucket_url may be None (proxy determines it from ACLs).

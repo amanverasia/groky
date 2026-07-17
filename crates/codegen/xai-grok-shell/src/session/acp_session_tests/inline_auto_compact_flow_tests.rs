@@ -153,7 +153,6 @@ async fn create_test_actor(
         client_identifier: None,
         origin_client: None,
         feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-        upload_queue: Arc::new(OnceLock::new()),
         sync_loop_cancel: None,
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -231,7 +230,6 @@ async fn create_test_actor(
         subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-        trace_config_template: std::cell::RefCell::new(None),
     }
 }
 /// Test that should_auto_compact returns correct trigger info.
@@ -595,7 +593,6 @@ async fn create_test_actor_with_memory(
         client_identifier: None,
         origin_client: None,
         feedback_manager: Arc::new(FeedbackManager::local_only("test-memory")),
-        upload_queue: Arc::new(OnceLock::new()),
         sync_loop_cancel: None,
         agent: std::cell::RefCell::new(test_agent_default().await),
         last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -676,7 +673,6 @@ async fn create_test_actor_with_memory(
         subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-        trace_config_template: std::cell::RefCell::new(None),
     }
 }
 #[tokio::test(flavor = "current_thread")]
@@ -1353,7 +1349,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 client_identifier: None,
                 origin_client: None,
                 feedback_manager: Arc::new(FeedbackManager::local_only("test-session")),
-                upload_queue: Arc::new(OnceLock::new()),
                 sync_loop_cancel: None,
                 agent: std::cell::RefCell::new(test_agent_default().await),
                 last_reported_branch: std::sync::Arc::new(parking_lot::Mutex::new(None)),
@@ -1439,7 +1434,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
-                trace_config_template: std::cell::RefCell::new(None),
             };
             let eleven_minutes_ago_ms = chrono::Utc::now().timestamp_millis() - (11 * 60 * 1000);
             actor

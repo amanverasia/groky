@@ -546,30 +546,7 @@ See [Keyboard Shortcuts](03-keyboard-shortcuts.md) for the complete reference.
 
 ### Telemetry
 
-The `[features] telemetry` toggle (in the `[features]` block above) is the master switch for anonymous usage telemetry. When telemetry is enabled, enterprises that run their own collector can redirect it or selectively disable parts of it under `[telemetry]`:
-
-```toml
-[telemetry]
-events_url = "https://telemetry.your-company.com/events"  # send events to your own collector
-events_api_key = "your-collector-token"                   # auth for your collector, if required
-mixpanel_enabled = false                                  # disable Mixpanel product analytics
-trace_upload = false                                      # disable session/trace uploads (inherits the telemetry toggle when unset)
-```
-
-Set these only to point telemetry at your own infrastructure or to turn parts of it off. The built-in endpoint and credentials are managed by Grok; leave them unset to use the defaults.
-
-The same `[telemetry]` table also configures the **external OpenTelemetry stream** — an independent opt-in (it does not require the telemetry toggle above) that ships a curated, content-free usage schema to your *own* OTLP collector. Collector auth is supplied via `OTEL_EXPORTER_OTLP_HEADERS` and is never stored on disk. See [Monitoring & Usage](24-monitoring-usage.md) for the full schema, env vars, and privacy model.
-
-```toml
-[telemetry]
-otel_enabled = true                                       # external OTEL master switch (= GROK_EXTERNAL_OTEL)
-otel_metrics_exporter = "otlp"                            # otlp | console | none
-otel_logs_exporter = "otlp"                               # otlp | console | none
-otel_endpoint = "https://collector.corp.example:4318"     # OTLP base endpoint
-otel_protocol = "http/protobuf"                           # http/protobuf | grpc
-otel_log_user_prompts = false                             # content gate (admins can pin via requirements)
-otel_log_tool_details = false                             # content gate (admins can pin via requirements)
-```
+Grok performs no network telemetry. The `[features] telemetry` toggle (in the `[features]` block above) is retained for config compatibility but only governs local diagnostics; there is no `[telemetry]` destination config.
 
 ### Enterprise Deployment
 

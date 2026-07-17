@@ -58,7 +58,7 @@ pub(crate) struct GitHeadPatch {
     pub branch: Option<String>,
 }
 
-/// Telemetry trace bookkeeping. `next_trace_turn` is monotonic; `request_id`
+/// Local turn accounting. `next_trace_turn` is monotonic; `request_id`
 /// is applied only when this turn wins, so a stale lower-turn write cannot
 /// leave a high `next_trace_turn` paired with an older `request_id` (these
 /// were set together in the legacy read-modify-write path).

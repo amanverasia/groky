@@ -680,7 +680,7 @@ pub async fn try_ensure_fresh_auth(grok_com_config: &GrokComConfig) -> Option<Gr
 
     // auth() handles cached-valid (fast path), OIDC refresh, external
     // binary -- all through refresh_chain (single mutation point).
-    auth_manager.configure_refresher(grok_com_config.auth_provider_command.clone(), None);
+    auth_manager.configure_refresher(grok_com_config.auth_provider_command.clone());
     match auth_manager.auth().await {
         Ok(auth) => Some(auth),
         Err(e) => {
@@ -977,18 +977,6 @@ pub fn perform_logout(
         })),
     );
     if was_logged_in {
-        // Order matters for the no-leak guarantee (flush-on-logout
-        // parity). Clear the external OTEL identity attrs FIRST so any
-        // record emitted from here on cannot carry the prior user's ids; THEN
-        // flush already-queued records (which were built with their ids during
-        // the active session — that is correct); THEN clear credentials.
-        // Clearing identity before the flush closes the window in which a
-        // concurrent emission between flush and identity-reset would still
-        // stamp the prior user's ids onto a customer-collector record.
-        xai_grok_telemetry::external::set_identity(
-            xai_grok_telemetry::external::IdentityAttrs::default(),
-        );
-        xai_grok_telemetry::external::flush();
         if let Some(scope) = scope {
             auth_manager.remove_scope(scope)?;
         } else {
@@ -1953,7 +1941,7 @@ mod tests {
 
         // Same engine as `try_ensure_fresh_auth`.
         let auth_manager = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
-        auth_manager.configure_refresher(cfg.auth_provider_command.clone(), None);
+        auth_manager.configure_refresher(cfg.auth_provider_command.clone());
 
         assert!(
             auth_manager.auth().await.is_err(),

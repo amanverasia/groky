@@ -59,58 +59,6 @@ pub struct ToolCallResult {
     pub chat_completion_output: Option<serde_json::Value>,
 }
 
-// ── Trace donation ────────────────────────────────────────────────────────
-
-/// Hub rejects oversized batches wholesale; donors chunk before encoding.
-pub const MAX_SPANS_PER_DONATION: usize = 512;
-
-/// Maximum decoded `ExportTraceServiceRequest` size the hub accepts.
-pub const MAX_DONATION_BYTES: usize = 1024 * 1024;
-
-/// `traces.donate` params (tool_server → service notification).
-/// Envelope `session_id` required. `hub.*` span attributes are
-/// reserved — the hub strips them and stamps its own attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TracesDonateParams {
-    /// Base64 (standard alphabet, padded) protobuf-encoded
-    /// `opentelemetry.proto.collector.trace.v1.ExportTraceServiceRequest`.
-    pub otlp_request: String,
-}
-
-// ── Log donation ──────────────────────────────────────────────────────────
-
-/// Hub rejects oversized batches wholesale; donors chunk before encoding.
-/// The 1 MiB [`MAX_DONATION_BYTES`] decoded-size cap is the real bound; this
-/// record cap is a secondary guard symmetric with [`MAX_SPANS_PER_DONATION`].
-pub const MAX_LOG_RECORDS_PER_DONATION: usize = 512;
-
-/// `logs.donate` params (tool_server → service notification).
-/// Envelope `session_id` required. `hub.*` log attributes are reserved —
-/// the hub strips them and stamps its own attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LogsDonateParams {
-    /// Base64 (standard alphabet, padded) protobuf-encoded
-    /// `opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest`.
-    pub otlp_request: String,
-}
-
-// ── Metric donation ───────────────────────────────────────────────────────
-
-/// Hub rejects oversized batches wholesale; donors chunk before encoding.
-/// Secondary guard alongside the 1 MiB [`MAX_DONATION_BYTES`] decoded-size cap.
-pub const MAX_METRICS_PER_DONATION: usize = 512;
-
-/// `metrics.donate` params (tool_server → service notification).
-/// **No envelope `session_id`** — metrics are process-aggregate, not
-/// per-session (unlike [`LogsDonateParams`]). `hub.*` resource attributes
-/// are reserved — the hub strips them and stamps its own attribution.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MetricsDonateParams {
-    /// Base64 (standard alphabet, padded) protobuf-encoded
-    /// `opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest`.
-    pub otlp_request: String,
-}
-
 /// Body of a `tool_call_progress` notification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallProgressFrame {
@@ -1203,30 +1151,6 @@ mod tests {
         };
         let json = serde_json::to_value(&params).expect("serialize");
         let back: super::SystemNotifyParams = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, params);
-    }
-
-    // ── Donation params ────────────────────────────────────────────
-
-    #[test]
-    fn logs_donate_params_round_trips() {
-        let params = super::LogsDonateParams {
-            otlp_request: "b64payload".to_owned(),
-        };
-        let json = serde_json::to_value(&params).expect("serialize");
-        assert_eq!(json["otlp_request"], "b64payload");
-        let back: super::LogsDonateParams = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(back, params);
-    }
-
-    #[test]
-    fn metrics_donate_params_round_trips() {
-        let params = super::MetricsDonateParams {
-            otlp_request: "b64payload".to_owned(),
-        };
-        let json = serde_json::to_value(&params).expect("serialize");
-        assert_eq!(json["otlp_request"], "b64payload");
-        let back: super::MetricsDonateParams = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, params);
     }
 

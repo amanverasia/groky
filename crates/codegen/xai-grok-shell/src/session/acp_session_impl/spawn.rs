@@ -468,15 +468,6 @@ pub(crate) async fn spawn_session_actor(
     let auto_wake_delivered =
         xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds::default();
     tool_context.auto_wake_delivered = Some(auto_wake_delivered.clone());
-    let synthetic_trace_tx_shared: std::sync::Arc<
-        std::sync::Mutex<
-            Option<
-                tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>,
-            >,
-        >,
-    > = std::sync::Arc::new(std::sync::Mutex::new(None));
-    *synthetic_trace_tx_shared.lock().unwrap() = tool_context.synthetic_trace_tx.clone();
-    tool_context.synthetic_trace_tx_shared = Some(synthetic_trace_tx_shared.clone());
     let mut tool_context = tool_context.with_file_state_handle(file_state_handle);
     let index_root_for_session =
         xai_grok_workspace::session::git::find_git_root_from_path(tool_context.cwd.as_path())
@@ -524,7 +515,6 @@ pub(crate) async fn spawn_session_actor(
             turn_prompt_mode: turn_prompt_mode.clone(),
             session_cmd_tx: cmd_tx.clone(),
             auto_wake_delivered: auto_wake_delivered.clone(),
-            synthetic_trace_tx: synthetic_trace_tx_shared.clone(),
             task_output_tool_name: task_output_tool_name.clone(),
             read_tool_name: read_tool_name.clone(),
             auto_wake_enabled: tool_context.auto_wake_enabled,
@@ -593,7 +583,7 @@ pub(crate) async fn spawn_session_actor(
     let bridge_state_path =
         crate::session::persistence::session_dir(&session_info).join("tool_state.json");
     let initial_agent_type = Some(agent_definition.name.clone());
-    let harness_metrics = if telemetry_enabled || xai_grok_telemetry::external::is_active() {
+    let harness_metrics = if telemetry_enabled {
         let plugin_names = plugin_registry
             .as_ref()
             .map(|reg| {
@@ -1087,7 +1077,6 @@ pub(crate) async fn spawn_session_actor(
         .iter()
         .map(|e| e.to_string())
         .collect();
-    let upload_queue = Arc::new(std::sync::OnceLock::new());
     let (goal_update_tx, goal_update_rx) = tokio::sync::mpsc::unbounded_channel::<
         xai_grok_tools::implementations::grok_build::update_goal::UpdateGoalEnvelope,
     >();
@@ -1229,7 +1218,6 @@ pub(crate) async fn spawn_session_actor(
         client_identifier: session_client_identifier.clone(),
         origin_client: origin_client.clone(),
         feedback_manager: feedback_manager.clone(),
-        upload_queue: upload_queue.clone(),
         sync_loop_cancel: sync_loop_cancel.clone(),
         agent: std::cell::RefCell::new(agent),
         last_reported_branch: Arc::new(Mutex::new(None)),
@@ -1333,7 +1321,6 @@ pub(crate) async fn spawn_session_actor(
         subagent_spawn_info: parking_lot::Mutex::new(HashMap::new()),
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: workspace_ops.clone(),
-        trace_config_template: std::cell::RefCell::new(None),
     });
     {
         let drainer_session = session.clone();
@@ -1625,8 +1612,6 @@ pub(crate) async fn spawn_session_actor(
             initial_client_mcp_servers,
             display_cwd: None,
             feedback_manager: feedback_manager.clone(),
-            upload_queue: upload_queue.clone(),
-            upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             tool_context: tool_context_for_handle,
             model_id: session_model_id,
             reasoning_effort: sampling_config.reasoning_effort,

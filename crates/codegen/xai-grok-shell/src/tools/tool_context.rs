@@ -81,23 +81,6 @@ pub struct ToolContext {
     /// Used by `TaskCompletionReminder` to suppress duplicate reminders.
     pub auto_wake_delivered:
         Option<xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds>,
-    /// Channel for requesting trace uploads for synthetic auto-wake turns.
-    pub(crate) synthetic_trace_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
-    /// Shared slot for the synthetic trace channel. Populated by
-    /// `start_subagent_coordinator` after the notification bridge is spawned.
-    /// The notification bridge reads from this slot on each completion event.
-    pub(crate) synthetic_trace_tx_shared: Option<
-        std::sync::Arc<
-            std::sync::Mutex<
-                Option<
-                    tokio::sync::mpsc::UnboundedSender<
-                        crate::upload::turn::SyntheticTurnTraceRequest,
-                    >,
-                >,
-            >,
-        >,
-    >,
     /// Resolved name of the `BackgroundTaskAction` tool in the current toolset.
     /// Used by auto-wake to format completion messages with the correct tool name.
     pub task_output_tool_name: String,
@@ -144,8 +127,6 @@ impl ToolContext {
             is_turn_active: None,
             monitor_event_buffer: None,
             auto_wake_delivered: None,
-            synthetic_trace_tx: None,
-            synthetic_trace_tx_shared: None,
             task_output_tool_name:
                 xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string(),
             auto_wake_enabled: true,
@@ -180,8 +161,6 @@ impl ToolContext {
             is_turn_active: None,
             monitor_event_buffer: None,
             auto_wake_delivered: None,
-            synthetic_trace_tx: None,
-            synthetic_trace_tx_shared: None,
             task_output_tool_name:
                 xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string(),
             auto_wake_enabled: true,
@@ -236,8 +215,6 @@ mod tests {
                 is_turn_active: None,
                 monitor_event_buffer: None,
                 auto_wake_delivered: None,
-                synthetic_trace_tx: None,
-                synthetic_trace_tx_shared: None,
                 task_output_tool_name:
                     xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string(),
                 auto_wake_enabled: true,

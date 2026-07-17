@@ -423,15 +423,6 @@ pub fn init_tracing() -> TracingHandle {
         .with_target(true)
         .with_ansi(true)
         .with_writer(make_writer);
-    let otel_layer = xai_grok_telemetry::otel_layer::build_otel_layer(
-        xai_grok_telemetry::otel_layer::OtelClientInfo {
-            client_name: "grok-pager",
-            client_version: xai_grok_version::VERSION,
-            service_version: env!("VERSION_WITH_COMMIT"),
-            app_entrypoint: "tui",
-        },
-        xai_grok_shell::auth::credential_provider::build_default_otel_layer_config(),
-    );
     let instrumentation_layer = xai_grok_telemetry::instrumentation::layer();
     let sampling_log_layer = xai_grok_telemetry::sampling_log::layer();
     let hooks_log_layer = xai_grok_telemetry::hooks_log::layer();
@@ -439,18 +430,8 @@ pub fn init_tracing() -> TracingHandle {
         .with(fmt_layer.with_filter(env_filter))
         .with(instrumentation_layer)
         .with(sampling_log_layer)
-        .with(hooks_log_layer)
-        .with(otel_layer);
+        .with(hooks_log_layer);
     xai_grok_telemetry::debug_log::install_firehose(registry, "tui");
-    xai_grok_telemetry::external::init(
-        xai_grok_shell::agent::config::resolve_external_otel_config(
-            xai_grok_telemetry::external::config::ExternalClientInfo {
-                service_version: env!("VERSION_WITH_COMMIT").to_owned(),
-                client_version: xai_grok_version::VERSION.to_owned(),
-                app_entrypoint: "tui".to_owned(),
-            },
-        ),
-    );
     TracingHandle { rx }
 }
 #[cfg(test)]
@@ -905,6 +886,41 @@ mod tests {
         assert_eq!(model.len(), 3);
         assert_eq!(model.as_slice()[0].plain(), "line 3");
         assert_eq!(model.as_slice()[2].plain(), "line 5");
+    }
+    #[test]
+    fn tracing_registry_contains_only_local_layers() {
+        let source = include_str!("tracing.rs");
+        // Forbidden markers are built by concatenation so this test's own
+        // source (included via `include_str!`) cannot self-match.
+        for forbidden in [
+            format!("{}{}", "build_", "otel_layer"),
+            format!("{}{}", "external", "::init"),
+            format!("{}{}", "OTEL_", "EXPORTER"),
+            format!("{}{}", "GROK_", "EXTERNAL_OTEL"),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "remote tracing hook survived: {forbidden}"
+            );
+        }
+        // Positive markers scan only production code (truncated at the test
+        // module) and use fully-qualified call sites, so literals in this
+        // test cannot satisfy the assertions themselves.
+        let production = source
+            .split(concat!("#[cfg", "(test)]"))
+            .next()
+            .expect("split always yields at least one segment");
+        for required in [
+            "xai_grok_telemetry::instrumentation::layer()",
+            "xai_grok_telemetry::sampling_log::layer()",
+            "xai_grok_telemetry::hooks_log::layer()",
+            "xai_grok_telemetry::debug_log::install_firehose(",
+        ] {
+            assert!(
+                production.contains(required),
+                "local tracing layer missing: {required}"
+            );
+        }
     }
     #[test]
     fn make_writer_is_clone() {

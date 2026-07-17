@@ -81,20 +81,9 @@ use crate::session::{
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
-use crate::upload::manifest::write_error_manifest;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, TurnResultMetadata,
-    build_chat_history_session_state, local_sandbox_telemetry, upload_config,
-    upload_full_prompt_txt, upload_harness_session_archive, upload_images,
-    upload_metadata, upload_plugin_state, upload_session_state, upload_turn_messages,
-    upload_turn_result, upload_unified_log,
-};
-use crate::upload::turn::{
-    PromptTraceContext, UploadWait, complete_prompt_trace, spawn_upload_task,
-};
-use crate::upload::turn::{
-    apply_yolo_mode_to_matching_sessions, lookup_session_model,
-    parse_agent_profile_from_meta,
+use acp_meta::{
+    apply_yolo_mode_to_matching_sessions, lookup_session_model, parse_agent_profile_from_meta,
+    parse_ask_user_question_from_meta,
 };
 use tokio_util::sync::CancellationToken;
 use xai_grok_paths::AbsPathBuf;
@@ -701,12 +690,6 @@ pub struct MvpAgent {
     /// Per-session YOLO tracking lives in SessionHandle.yolo_mode.
     default_yolo_mode: bool,
     default_auto_mode: bool,
-    /// `Send` mirror of `cfg.is_trace_upload_enabled()` for the per-session
-    /// live collection gates (`cfg` is `!Send`; the gates run on the tokio
-    /// pool). Kept current by
-    /// [`Self::sync_collection_config_gate`] on every mid-session
-    /// `remote_settings` rewrite.
-    pub(crate) trace_upload_live: Arc<std::sync::atomic::AtomicBool>,
     /// Memory system configuration (None when --experimental-memory not set).
     memory_config: Option<crate::config::MemoryConfig>,
     /// Optional channel to the leader's `ConfigFileWatcher` for dynamic
@@ -1256,6 +1239,7 @@ impl Drop for SessionLoadGuard<'_> {
     }
 }
 mod code_nav;
+mod acp_meta;
 mod folder_trust_prompt;
 mod heap_profile;
 mod session_lifecycle;
@@ -1829,7 +1813,6 @@ impl MvpAgent {
                         cfg.remote_settings.as_ref(),
                     );
                 }
-                self.sync_collection_config_gate();
                 self.emit_announcements(AnnouncementsPushMode::IfChanged);
                 self.reconfigure_heap_profile_monitor();
             }
@@ -2040,7 +2023,6 @@ impl MvpAgent {
                 cfg.path_not_found_hints = v;
             }
         }
-        self.sync_collection_config_gate();
         self.emit_settings_update_notification();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
         self.reconfigure_heap_profile_monitor();
@@ -2216,271 +2198,6 @@ impl MvpAgent {
             }
         });
     }
-}
-/// Handle a synthetic turn trace request: allocate a turn number, build a
-/// trace context, await turn completion, then upload the trace.
-async fn handle_synthetic_turn_trace(
-    agent_ref: LocalRef<MvpAgent>,
-    request: crate::upload::turn::SyntheticTurnTraceRequest,
-) {
-    use crate::session::SessionCommand;
-    use crate::upload::turn::{UploadWait, complete_prompt_trace, spawn_upload_task};
-    let turn_started_at = chrono::Utc::now().to_rfc3339();
-    let (
-        info,
-        turn_number,
-        agent_config,
-        user_id,
-        user_email,
-        client_source,
-        client_version,
-        model,
-    ) = {
-        let this = agent_ref.get();
-        let session_info = {
-            let sessions = this.sessions.borrow();
-            let sid = &request.session_id;
-            sessions.get(sid).map(|h| h.info.clone())
-        };
-        let Some(info) = session_info else {
-            tracing::debug!(
-                session_id = % request.session_id.0, prompt_id = % request.prompt_id,
-                "Synthetic trace: session not found, skipping",
-            );
-            return;
-        };
-        let turn_number = this.allocate_turn_number(&request.session_id);
-        let auth = this.auth_manager.current();
-        let user_id = auth
-            .as_ref()
-            .filter(|a| a.is_xai_auth())
-            .map(|a| a.user_id.clone());
-        let user_email = auth.as_ref().and_then(|a| a.email.clone());
-        let init_meta = this.initialize_request.get().and_then(|req| req.meta.as_ref());
-        let client_source = init_meta
-            .and_then(|m| {
-                m
-                    .get("clientSource")
-                    .or_else(|| m.get("clientType"))
-                    .or_else(|| m.get("clientIdentifier"))
-            })
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let client_version = this.cfg.borrow().client_version.clone();
-        let model = {
-            let sessions = this.sessions.borrow();
-            sessions
-                .get(&request.session_id)
-                .map(|h| h.model_id.0.to_string())
-                .unwrap_or_else(|| this.models_manager.current_model_id().0.to_string())
-        };
-        let agent_config = this.cfg.borrow().clone();
-        (
-            info,
-            turn_number,
-            agent_config,
-            user_id,
-            user_email,
-            client_source,
-            client_version,
-            model,
-        )
-    };
-    let trace_context = {
-        let this = agent_ref.get();
-        let ctx = this.get_trace_context(&info, turn_number).await;
-        ctx
-    };
-    let Some(ctx) = trace_context else {
-        tracing::info!(
-            session_id = % request.session_id.0, prompt_id = % request.prompt_id,
-            "Synthetic trace: trace uploads disabled, skipping",
-        );
-        return;
-    };
-    let before_ctx = ctx.clone();
-    let metadata = PromptMetadata {
-        schema_version: GCS_SCHEMA_VERSION.to_string(),
-        session_id: ctx.session_info.id.0.to_string(),
-        turn_number: ctx.turn_number,
-        request_id: request.prompt_id.clone(),
-        turn_started_at,
-        repo_root: None,
-        remote_url: None,
-        user_id,
-        user_email,
-        team_id: None,
-        client_source,
-        client_version,
-        model: model.clone(),
-        reasoning_effort: ctx
-            .session_handle
-            .reasoning_effort
-            .map(|e| e.as_str().to_string()),
-        experiment_id: None,
-        host_os: std::env::consts::OS.to_string(),
-        host_arch: std::env::consts::ARCH.to_string(),
-        prompt_has_image: Some(false),
-        prompt_was_truncated: Some(false),
-        prompt_verbatim: Some(true),
-        cwd: Some(info.cwd.clone()),
-        agent_type: None,
-        shell_version: Some(xai_grok_version::VERSION.to_string()),
-        workspace_type: None,
-        sandbox: local_sandbox_telemetry(),
-    };
-    spawn_upload_task(
-        "synthetic_before_uploads",
-        async move {
-            futures::join!(
-                upload_session_state(& before_ctx, "before", request
-                .before_session_copy_rx, UploadWait::Confirm,), upload_metadata(&
-                before_ctx, metadata), upload_config(& before_ctx, & agent_config), crate
-                ::upload::config_files::upload_config_files(& before_ctx),
-            );
-        },
-    );
-    let turn_result = request.completion_rx.await;
-    let Ok(prompt_result) = turn_result else {
-        tracing::debug!(
-            session_id = % request.session_id.0, prompt_id = % request.prompt_id,
-            "Synthetic trace: turn completion channel dropped, skipping",
-        );
-        return;
-    };
-    match &prompt_result {
-        Ok(turn_ok) => {
-            let completed = matches!(turn_ok.stop_reason, acp::StopReason::EndTurn);
-            let turn_result_metadata = TurnResultMetadata {
-                schema_version: GCS_SCHEMA_VERSION,
-                request_id: request.prompt_id.clone(),
-                completed,
-                stop_reason: Some(format!("{:?}", turn_ok.stop_reason)),
-                total_tokens: Some(turn_ok.total_tokens),
-                input_tokens: turn_ok
-                    .turn_snapshot
-                    .as_ref()
-                    .map(|s| s.turn_input_tokens),
-                cached_input_tokens: turn_ok
-                    .turn_snapshot
-                    .as_ref()
-                    .map(|s| s.turn_cached_input_tokens),
-                output_tokens: turn_ok
-                    .turn_snapshot
-                    .as_ref()
-                    .map(|s| s.turn_output_tokens),
-                error: None,
-                finished_at: chrono::Utc::now().to_rfc3339(),
-                signals: turn_ok.turn_snapshot.as_ref().map(|s| s.current.clone()),
-                turn_delta: turn_ok.turn_snapshot.as_ref().map(|s| s.delta.clone()),
-                start_prompt_mode: None,
-                end_prompt_mode: None,
-                resolved_model: Some(model.clone()),
-                subagents_spawned: vec![],
-            };
-            upload_turn_result(&ctx, &turn_result_metadata, UploadWait::Confirm).await;
-        }
-        Err(e) => {
-            let turn_result_metadata = TurnResultMetadata {
-                schema_version: GCS_SCHEMA_VERSION,
-                request_id: request.prompt_id.clone(),
-                completed: false,
-                stop_reason: None,
-                total_tokens: None,
-                input_tokens: None,
-                cached_input_tokens: None,
-                output_tokens: None,
-                error: Some(e.to_string()),
-                finished_at: chrono::Utc::now().to_rfc3339(),
-                signals: None,
-                turn_delta: None,
-                start_prompt_mode: None,
-                end_prompt_mode: None,
-                resolved_model: Some(model.clone()),
-                subagents_spawned: vec![],
-            };
-            upload_turn_result(&ctx, &turn_result_metadata, UploadWait::Confirm).await;
-        }
-    }
-    let turn_messages: Option<xai_chat_state::TurnCapture> = {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if ctx
-            .session_handle
-            .cmd_tx
-            .send(SessionCommand::TakeTurnMessages {
-                respond_to: tx,
-            })
-            .is_ok()
-        {
-            rx.await.ok().flatten()
-        } else {
-            None
-        }
-    };
-    let permission_events = {
-        let this = agent_ref.get();
-        this.collect_permission_events(&request.session_id)
-    };
-    let (session_copy_tx, session_copy_rx) = tokio::sync::oneshot::channel();
-    let _ = ctx
-        .session_handle
-        .cmd_tx
-        .send(SessionCommand::CopyFile {
-            respond_to: session_copy_tx,
-        });
-    let synthetic_committed = matches!(
-        & prompt_result, Ok(ok) if matches!(ok.stop_reason, acp::StopReason::EndTurn)
-    );
-    let streaming_partial = crate::upload::turn::take_streaming_partial(
-            &ctx.session_handle.cmd_tx,
-            request.prompt_id.clone(),
-            synthetic_committed,
-            Some(model.clone()),
-        )
-        .await
-        .map(|mut cap| {
-            cap.reason
-                .get_or_insert_with(|| match &prompt_result {
-                    Ok(turn_ok) => {
-                        match &turn_ok.completion_kind {
-                            crate::session::commands::PromptCompletionKind::Cancelled {
-                                category,
-                                ..
-                            } => {
-                                match category {
-                                    Some(cat) => format!("synthetic_cancelled:{cat:?}"),
-                                    None => "synthetic_cancelled".to_string(),
-                                }
-                            }
-                            _ => "synthetic_non_completed".to_string(),
-                        }
-                    }
-                    Err(e) => format!("synthetic_error:{e:?}"),
-                });
-            cap
-        });
-    spawn_upload_task(
-        "synthetic_turn_trace",
-        async move {
-            match complete_prompt_trace(
-                    ctx,
-                    permission_events,
-                    session_copy_rx,
-                    turn_messages,
-                    streaming_partial,
-                    UploadWait::Confirm,
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        error = % e, "Synthetic turn trace upload failed (non-fatal)",
-                    );
-                }
-            }
-        },
-    );
 }
 /// Clears [`MvpAgent::post_unblock_jwt_retry_in_flight`] on scope exit —
 /// success, exhaustion, cancel/abort, or panic — so the single-flight flag

@@ -14,12 +14,6 @@ use crate::session::{
 };
 use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
-use crate::upload::trace::{
-    GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
-};
-use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
