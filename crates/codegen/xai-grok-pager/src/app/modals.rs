@@ -877,9 +877,12 @@ impl AgentView {
                                         // Model picker: render from current
                                         // state now, refresh the provider
                                         // catalog in the background (one
-                                        // coalesced effect per open).
+                                        // coalesced effect per open;
+                                        // non-forced → 24h staleness gate).
                                         if matches!(trimmed.as_str(), "model" | "m") {
-                                            return InputOutcome::Action(Action::RefreshProviders);
+                                            return InputOutcome::Action(
+                                                Action::RefreshProviders { force: false },
+                                            );
                                         }
                                         return InputOutcome::Changed;
                                     }

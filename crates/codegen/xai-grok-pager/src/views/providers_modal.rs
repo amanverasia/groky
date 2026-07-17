@@ -278,7 +278,9 @@ pub fn handle_providers_key(state: &mut ProvidersModalState, key: &KeyEvent) -> 
                     ProvidersOutcome::Unchanged
                 }
             }
-            KeyCode::Char('r') => ProvidersOutcome::Action(Action::RefreshProviders),
+            KeyCode::Char('r') => {
+                ProvidersOutcome::Action(Action::RefreshProviders { force: true })
+            }
             _ => ProvidersOutcome::Unchanged,
         },
     }

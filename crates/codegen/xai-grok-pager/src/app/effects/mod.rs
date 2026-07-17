@@ -2114,11 +2114,11 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RefreshProviders => {
+        Effect::RefreshProviders { force } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let params = serde_json::json!({});
+                    let params = serde_json::json!({ "force" : force });
                     let req = acp::ExtRequest::new(
                         "x.ai/providers/refresh",
                         serde_json::value::to_raw_value(&params)

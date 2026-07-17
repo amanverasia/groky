@@ -79,6 +79,15 @@ pub struct ClearProviderKeyRequest {
     pub provider_id: String,
 }
 
+/// Params for `x.ai/providers/refresh`. `force` skips the 24h staleness
+/// gate; absent (older clients) it defaults to a gated refresh.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshRequest {
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// Response for `x.ai/providers/refresh`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +118,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             let req: ClearProviderKeyRequest = parse_params(args)?;
             to_raw_response(&clear_provider_key(&surface, req)?)
         }
-        "x.ai/providers/refresh" => to_raw_response(&refresh_providers(&surface)),
+        "x.ai/providers/refresh" => {
+            let req: RefreshRequest = parse_params(args)?;
+            to_raw_response(&refresh_providers(&surface, req))
+        }
         _ => Err(acp::Error::method_not_found()),
     }
 }
@@ -123,7 +135,7 @@ pub fn list_providers(surface: &ProviderSurface) -> Result<ProviderListResponse,
     let refresh_started = !matches!(*adapter.snapshot().status(), RefreshStatus::Fresh)
         && adapter.try_begin_refresh();
     if refresh_started {
-        spawn_catalog_refresh(surface, Arc::clone(&adapter));
+        spawn_catalog_refresh(surface, Arc::clone(&adapter), false);
     }
     Ok(ProviderListResponse {
         providers: provider_rows(surface, &adapter),
@@ -186,14 +198,19 @@ pub fn clear_provider_key(
 }
 
 /// `x.ai/providers/refresh`: start one coalesced background catalog refresh.
-/// No model discovery is performed.
-pub fn refresh_providers(surface: &ProviderSurface) -> RefreshResponse {
+/// Non-forced requests (picker open) respect the 24h staleness gate — a
+/// fresh cache means no network I/O. `force: true` (explicit user refresh)
+/// skips the gate. No model discovery is performed.
+pub fn refresh_providers(surface: &ProviderSurface, req: RefreshRequest) -> RefreshResponse {
     let Ok(adapter) = require_adapter(surface) else {
         return RefreshResponse { started: false };
     };
+    if !req.force && matches!(*adapter.snapshot().status(), RefreshStatus::Fresh) {
+        return RefreshResponse { started: false };
+    }
     let started = adapter.try_begin_refresh();
     if started {
-        spawn_catalog_refresh(surface, adapter);
+        spawn_catalog_refresh(surface, adapter, req.force);
     }
     RefreshResponse { started }
 }
@@ -291,11 +308,17 @@ fn broadcast_providers_update(surface: &ProviderSurface, adapter: &ProviderCatal
         .broadcast_ext_notification(PROVIDERS_UPDATE_METHOD, &payload);
 }
 
-/// Background catalog refresh: bounded HTTP fetch, no model discovery. On a
-/// changed catalog, recomposes model availability (which broadcasts
-/// `x.ai/models/update`) and pushes a replacement provider snapshot. The
-/// caller must have won `try_begin_refresh`.
-fn spawn_catalog_refresh(surface: &ProviderSurface, adapter: Arc<ProviderCatalogAdapter>) {
+/// Background catalog refresh: bounded HTTP fetch, no model discovery. When
+/// `force` is false the manager's 24h staleness gate is authoritative (a
+/// fresh cache performs no network I/O). On a changed catalog, recomposes
+/// model availability (which broadcasts `x.ai/models/update`) and pushes a
+/// replacement provider snapshot. The caller must have won
+/// `try_begin_refresh`.
+fn spawn_catalog_refresh(
+    surface: &ProviderSurface,
+    adapter: Arc<ProviderCatalogAdapter>,
+    force: bool,
+) {
     /// Releases the refresh slot on drop, so a panic inside `refresh()`
     /// cannot wedge the in-flight flag.
     struct RefreshSlotGuard(Arc<ProviderCatalogAdapter>);
@@ -308,7 +331,11 @@ fn spawn_catalog_refresh(surface: &ProviderSurface, adapter: Arc<ProviderCatalog
     tokio::spawn(async move {
         let outcome = {
             let _guard = RefreshSlotGuard(Arc::clone(&adapter));
-            adapter.refresh().await
+            if force {
+                adapter.refresh().await
+            } else {
+                adapter.refresh_if_stale().await
+            }
         };
         match outcome {
             Ok(RefreshOutcome::Updated) => {

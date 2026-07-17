@@ -234,6 +234,15 @@ impl ProviderCatalogAdapter {
         self.manager.refresh().await
     }
 
+    /// Refreshes only when the cache is missing or older than the manager's
+    /// refresh interval (24h); a fresh cache returns without network I/O.
+    /// Callers coordinate coalescing via [`Self::try_begin_refresh`].
+    pub async fn refresh_if_stale(
+        &self,
+    ) -> Result<xai_grok_catalog::RefreshOutcome, CatalogError> {
+        self.manager.refresh_if_stale().await
+    }
+
     /// Records a session-scoped provider API key (highest precedence).
     pub fn set_session_key(&self, provider_id: &ProviderId, api_key: String) {
         self.session_keys
