@@ -846,9 +846,15 @@ impl ProviderCatalogAdapter {
         config.base_url = request.base_url.clone();
         config.allow_insecure_http = request.allow_insecure_http;
         if let Err(err) = self.configure_dynamic(config.clone()) {
+            // The raw base URL may embed userinfo credentials (that is one
+            // of the ways validation fails); redact before it can reach a
+            // user-facing message, and drop it entirely if unparseable.
+            let attempted = url::Url::parse(&request.base_url)
+                .map(|url| redact_userinfo(&url))
+                .unwrap_or_else(|_| "the configured base URL".to_string());
             let message = match &err {
                 ProviderAdapterError::Endpoint(http) => {
-                    janus_failure(&janus_failure_from_http(http, &request.base_url))
+                    janus_failure(&janus_failure_from_http(http, &attempted))
                 }
                 other => other.to_string(),
             };
@@ -1028,12 +1034,38 @@ impl ProviderCatalogAdapter {
     /// startup.
     fn register_persisted_dynamic_providers(&self) {
         let path = self.grok_home.join(DYNAMIC_PROVIDERS_FILE);
-        let Some(file) = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PersistedDynamicProviders>(&bytes).ok())
-        else {
-            return;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to read persisted dynamic providers"
+                );
+                return;
+            }
         };
+        let file = match serde_json::from_slice::<PersistedDynamicProviders>(&bytes) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to parse persisted dynamic providers"
+                );
+                return;
+            }
+        };
+        if file.schema_version != DYNAMIC_PROVIDERS_SCHEMA_VERSION {
+            tracing::warn!(
+                path = %path.display(),
+                schema_version = file.schema_version,
+                expected = DYNAMIC_PROVIDERS_SCHEMA_VERSION,
+                "ignoring persisted dynamic providers with unknown schema version"
+            );
+            return;
+        }
         for persisted in file.providers {
             if persisted.id != JANUS_PROVIDER_ID {
                 tracing::debug!(

@@ -182,6 +182,26 @@ async fn janus_setup_reports_auth_and_empty_list_exactly() {
     assert_eq!(result, JanusSetupResult::Empty);
 }
 
+/// A base URL carrying userinfo fails validation, and the failure message
+/// must not echo the embedded credentials back to the client.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_failure_message_redacts_userinfo_in_base_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let adapter = adapter(tmp.path());
+
+    let result = adapter
+        .setup_janus(setup_request("https://alice:hunter2@example.com/v1", None))
+        .await
+        .unwrap();
+    let JanusSetupResult::Failed { message, .. } = result else {
+        panic!("expected Failed, got {result:?}");
+    };
+    assert!(
+        !message.contains("hunter2") && !message.contains("alice:"),
+        "failure message must redact URL userinfo: {message}"
+    );
+}
+
 /// The serialized ACP response after a keyed setup carries neither the key
 /// value nor an `apiKey` field.
 #[tokio::test(flavor = "multi_thread")]
