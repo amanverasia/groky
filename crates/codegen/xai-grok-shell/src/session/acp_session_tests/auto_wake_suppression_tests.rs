@@ -266,8 +266,6 @@ async fn user_prompt_preempt_keeps_running_synthetic_slot() {
                     PromptMode::Agent,
                     None,
                     None,
-                    None,
-                    None,
                     false,
                     None,
                     false,

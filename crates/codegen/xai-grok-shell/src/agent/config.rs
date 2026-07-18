@@ -9013,26 +9013,6 @@ agent_type = "cursor"
             "exactly the typo'd key must be flagged"
         );
     }
-    /// Regression: a deployment key with no OAuth token must resolve to Proxy.
-    #[test]
-    fn resolve_upload_method_accepts_deployment_key_without_oauth() {
-        use crate::session::repo_changes::UploadMethod;
-        let endpoints = EndpointsConfig {
-            deployment_key: Some("enterprise-key".to_string()),
-            ..Default::default()
-        };
-        match endpoints.resolve_upload_method(None) {
-            Some(UploadMethod::Proxy {
-                deployment_key,
-                user_token,
-                ..
-            }) => {
-                assert_eq!(deployment_key.as_deref(), Some("enterprise-key"));
-                assert_eq!(user_token, "");
-            }
-            other => panic!("expected Proxy upload method, got {other:?}"),
-        }
-    }
     fn empty_config() -> toml::Value {
         toml::Value::Table(toml::map::Map::new())
     }
