@@ -34,8 +34,12 @@ rustflags = [
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "force-unwind-tables=yes"]
 
+# target-cpu=generic (SIGILL fix): upstream tunes for Neoverse V2 (ARMv9-A)
+# servers, which emits instructions that trap on ARMv8 hosts such as Oracle
+# Ampere A1 (Neoverse N1). GitHub's arm runners are ARMv9, so only the CI
+# guard in release.yml catches a regression before users do.
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=neoverse-v2", "-C", "force-unwind-tables=yes"]
+rustflags = ["-C", "target-cpu=generic", "-C", "force-unwind-tables=yes"]
 
 [target.x86_64-unknown-linux-musl]
 rustflags = [

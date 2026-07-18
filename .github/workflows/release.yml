@@ -58,6 +58,17 @@ jobs:
             echo "VERSION=0.0.0-dev" >> "$GITHUB_ENV"
           fi
 
+      # Release binaries must be portable. An over-specific target-cpu
+      # (e.g. upstream's neoverse-v2) generates instructions that SIGILL on
+      # older CPUs; the runner itself is too new to catch it in the smoke
+      # test. See docs/superpowers/specs/2026-07-17-portable-arm-no-login-no-phone-home-design.md
+      - name: Guard portable target-cpu
+        run: |
+          if grep -En 'target-cpu=' .cargo/config.toml | grep -v 'target-cpu=generic'; then
+            echo "non-generic target-cpu in .cargo/config.toml breaks portable Linux builds" >&2
+            exit 1
+          fi
+
       - run: cargo build --release -p xai-grok-pager-bin
 
       - name: Smoke test
