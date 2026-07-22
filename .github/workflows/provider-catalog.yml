@@ -1,5 +1,9 @@
 name: provider-catalog
 
+# Read-only access; check job only reads the repo and compiles.
+permissions:
+  contents: read
+
 on:
   push:
     paths:
