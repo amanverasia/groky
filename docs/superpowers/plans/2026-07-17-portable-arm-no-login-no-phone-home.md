@@ -22,7 +22,7 @@
 
 **Files:** none
 
-- [ ] **Step 0.1: Create a work branch from main**
+- [x] **Step 0.1: Create a work branch from main**
 
 ```bash
 git checkout -b fix/portable-arm-no-login-no-phone-home
@@ -36,7 +36,7 @@ git checkout -b fix/portable-arm-no-login-no-phone-home
 - Modify: `.cargo/config.toml:37-38`
 - Modify: `.github/workflows/release.yml` (insert step before the `cargo build` step at line 61)
 
-- [ ] **Step 1.1: Change target-cpu to generic**
+- [x] **Step 1.1: Change target-cpu to generic**
 
 In `.cargo/config.toml`, replace:
 
@@ -56,7 +56,7 @@ with:
 rustflags = ["-C", "target-cpu=generic", "-C", "force-unwind-tables=yes"]
 ```
 
-- [ ] **Step 1.2: Add the CI guard step to release.yml**
+- [x] **Step 1.2: Add the CI guard step to release.yml**
 
 In `.github/workflows/release.yml`, insert between the `Derive version` step and the `cargo build` step (i.e., immediately before `- run: cargo build --release -p xai-grok-pager-bin`):
 
@@ -73,7 +73,7 @@ In `.github/workflows/release.yml`, insert between the `Derive version` step and
           fi
 ```
 
-- [ ] **Step 1.3: Verify the guard logic locally**
+- [x] **Step 1.3: Verify the guard logic locally**
 
 ```bash
 bash -c "if grep -En 'target-cpu=' .cargo/config.toml | grep -v 'target-cpu=generic'; then echo FAIL; else echo PASS; fi"
@@ -81,7 +81,7 @@ bash -c "if grep -En 'target-cpu=' .cargo/config.toml | grep -v 'target-cpu=gene
 
 Expected: `PASS` (after Step 1.1). Sanity-check the negative: temporarily `git stash`, run again, expect the neoverse-v2 line printed + `FAIL`, then `git stash pop`.
 
-- [ ] **Step 1.4: Commit**
+- [x] **Step 1.4: Commit**
 
 ```bash
 git add .cargo/config.toml .github/workflows/release.yml
@@ -102,7 +102,7 @@ reintroduce the flag."
 
 **TDD deviation, documented:** do NOT run these tests before Task 3–4 land. Against the current code, `run_update_if_available` reaches the real network and writes `cli.auto_update = true` into the developer's real `~/.groky` config — running it pre-facade is harmful, not just red. The "failing" evidence is that the assertions codify behavior the current code demonstrably violates (network fetch + config write, per `auto_update.rs:388-461,489-498`).
 
-- [ ] **Step 2.1: Write the facade contract tests**
+- [x] **Step 2.1: Write the facade contract tests**
 
 Create `crates/codegen/xai-grok-update/tests/test_facade.rs`:
 
@@ -187,7 +187,7 @@ async fn enforce_minimum_version_is_inert() {
 }
 ```
 
-- [ ] **Step 2.2: Verify it compiles against the current API (do not run)**
+- [x] **Step 2.2: Verify it compiles against the current API (do not run)**
 
 ```bash
 cargo test -p xai-grok-update --test test_facade --no-run
@@ -195,7 +195,7 @@ cargo test -p xai-grok-update --test test_facade --no-run
 
 Expected: compiles (the facade preserves this exact API; compiling now proves the tests target the real signatures).
 
-- [ ] **Step 2.3: Commit**
+- [x] **Step 2.3: Commit**
 
 ```bash
 git add crates/codegen/xai-grok-update/tests/test_facade.rs
@@ -209,7 +209,7 @@ git commit -m "test(update): add facade contract tests (not yet passing/run)"
 **Files:**
 - Modify: `crates/codegen/xai-grok-update/src/version.rs`
 
-- [ ] **Step 3.1: Delete the networked fetchers and endpoint constants**
+- [x] **Step 3.1: Delete the networked fetchers and endpoint constants**
 
 Delete these items from `version.rs` (names as in the current file; line numbers pre-edit):
 
@@ -226,7 +226,7 @@ Delete these items from `version.rs` (names as in the current file; line numbers
 
 Keep (unchanged): `TTL_SECONDS_BEFORE_AUTO_UPDATE`, `UpdateConfig` + `from_environment`, `GrokVersion` + `is_fresh`/`new`, `write_version_cache`, `is_version_cache_fresh`, `pub use xai_grok_version::installed as get_installed_grok_version`, `installed_on_disk_version`, `version_from_versioned_binary_name`, `cached_stable_version`, `derive_channel`, `channel_name`, `channel_label`, and all remaining tests.
 
-- [ ] **Step 3.2: Fix the imports at the top of version.rs**
+- [x] **Step 3.2: Fix the imports at the top of version.rs**
 
 Replace the import block (lines 1–10) with:
 
@@ -242,11 +242,11 @@ use xai_grok_shell::util::grok_home::grok_home;
 
 (Removed: `anyhow::Result`, `serde_json::Value`, `tokio::process::Command` — all only used by deleted fetchers.)
 
-- [ ] **Step 3.3: Update the module-level docs on write_version_cache and channel helpers**
+- [x] **Step 3.3: Update the module-level docs on write_version_cache and channel helpers**
 
 In the doc comment of `write_version_cache` (pre-edit line 353–358) the text still reads correctly (local cache write). In the doc comment of `channel_label` (pre-edit 545–553) and `channel_name`, replace the phrase `(written by the auto-updater)` with `(written by a previous upstream-grok auto-updater run, if any)` so the docs don't claim an updater exists.
 
-- [ ] **Step 3.4: Check it compiles (auto_update.rs will now be broken — expected)**
+- [x] **Step 3.4: Check it compiles (auto_update.rs will now be broken — expected)**
 
 ```bash
 cargo check -p xai-grok-update 2>&1 | tail -20
@@ -263,7 +263,7 @@ Expected: errors ONLY in `auto_update.rs` / `minimum_version.rs` referencing del
 - Rewrite: `crates/codegen/xai-grok-update/src/minimum_version.rs` (entire file replaced)
 - Unchanged: `crates/codegen/xai-grok-update/src/lib.rs` (all its re-exports still resolve)
 
-- [ ] **Step 4.1: Replace auto_update.rs entirely with the facade**
+- [x] **Step 4.1: Replace auto_update.rs entirely with the facade**
 
 ```rust
 //! Local-only compatibility facade for the former auto-updater.
@@ -431,7 +431,7 @@ pub async fn run_update(
 
 Note what is intentionally gone (previously `pub` but with zero external callers, verified by repo-wide search): `auto_update_target`, `get_installer`, `restart_grok`, `run_install_script`, `download_with_progress`, `download_silent`, `install_internal_from_bases`, `install_internal_from_base`, `install_npm_for_test`, plus all private download/symlink/npm/gh machinery.
 
-- [ ] **Step 4.2: Replace minimum_version.rs entirely**
+- [x] **Step 4.2: Replace minimum_version.rs entirely**
 
 ```rust
 //! Local-only facade: minimum-version enforcement is disabled in groky.
@@ -447,7 +447,7 @@ use crate::version::UpdateConfig;
 pub async fn enforce_minimum_version_or_exit(_update_config: &UpdateConfig) {}
 ```
 
-- [ ] **Step 4.3: Verify lib.rs still resolves and the crate compiles**
+- [x] **Step 4.3: Verify lib.rs still resolves and the crate compiles**
 
 `src/lib.rs` must remain exactly:
 
@@ -467,7 +467,7 @@ cargo check -p xai-grok-update
 
 Expected: PASS (test files still reference deleted items — that's Task 5; `cargo check` without `--tests` skips them).
 
-- [ ] **Step 4.4: Verify all external consumers compile unchanged**
+- [x] **Step 4.4: Verify all external consumers compile unchanged**
 
 ```bash
 cargo check -p xai-grok-pager -p xai-grok-pager-bin
@@ -475,7 +475,7 @@ cargo check -p xai-grok-pager -p xai-grok-pager-bin
 
 Expected: PASS with zero source changes in either crate.
 
-- [ ] **Step 4.5: Commit**
+- [x] **Step 4.5: Commit**
 
 ```bash
 git add crates/codegen/xai-grok-update/src
@@ -504,7 +504,7 @@ groky updates via the installer instead."
 - Modify: `crates/codegen/xai-grok-update/tests/common/mod.rs`
 - Keep: `tests/test_io.rs` (local version-cache I/O), `tests/test_facade.rs`, `tests/test_install_sh.rs` (exercises the legacy pager install script with a fake curl; no network)
 
-- [ ] **Step 5.1: Delete the network/install test files**
+- [x] **Step 5.1: Delete the network/install test files**
 
 ```bash
 git rm crates/codegen/xai-grok-update/tests/test_network.rs \
@@ -517,7 +517,7 @@ git rm crates/codegen/xai-grok-update/tests/test_network.rs \
        crates/codegen/xai-grok-update/tests/common/artifact_server.rs
 ```
 
-- [ ] **Step 5.2: Replace the crate Cargo.toml**
+- [x] **Step 5.2: Replace the crate Cargo.toml**
 
 Removed deps: `reqwest`, `indicatif`, `futures`, `thiserror`, `xai-grok-tools`; removed dev-dep: `wiremock`.
 
@@ -549,11 +549,11 @@ tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "test
 dunce = { workspace = true }
 ```
 
-- [ ] **Step 5.3: Trim tests/common/mod.rs**
+- [x] **Step 5.3: Trim tests/common/mod.rs**
 
 Open `crates/codegen/xai-grok-update/tests/common/mod.rs`. Remove any `mod artifact_server;` / `pub use artifact_server::...` lines and any helpers the compiler now flags as unused (e.g., `FakeBinGuard`, fake-npm/gh PATH helpers) after Step 5.1. Keep the GROK_HOME isolation guard and anything `test_io.rs` / `test_install_sh.rs` still use. Compiler-guided: iterate until Step 5.4 is warning-clean for dead code in tests/common.
 
-- [ ] **Step 5.4: Run the crate test suite — facade tests now run for real**
+- [x] **Step 5.4: Run the crate test suite — facade tests now run for real**
 
 ```bash
 cargo test -p xai-grok-update
@@ -561,7 +561,7 @@ cargo test -p xai-grok-update
 
 Expected: PASS. This includes `test_facade.rs` (Task 2), `test_io.rs`, `test_install_sh.rs`, and the retained unit tests in `version.rs`. Fix any dead-code fallout in `tests/common/mod.rs` per Step 5.3.
 
-- [ ] **Step 5.5: Clippy the crate**
+- [x] **Step 5.5: Clippy the crate**
 
 ```bash
 cargo clippy -p xai-grok-update --all-targets
@@ -569,7 +569,7 @@ cargo clippy -p xai-grok-update --all-targets
 
 Expected: no new warnings (async-without-await stubs are fine; the signatures are the API contract).
 
-- [ ] **Step 5.6: Commit**
+- [x] **Step 5.6: Commit**
 
 ```bash
 git add -A crates/codegen/xai-grok-update
@@ -583,7 +583,7 @@ git commit -m "test(update): drop network test suites, prune reqwest/indicatif/f
 **Files:**
 - Modify: `bin/check-no-network-telemetry.sh:2-3,31-34`
 
-- [ ] **Step 6.1: Update the header comment**
+- [x] **Step 6.1: Update the header comment**
 
 Replace line 3:
 
@@ -598,7 +598,7 @@ with:
 # Announcement types are local-only persistence (no HTTP).
 ```
 
-- [ ] **Step 6.2: Replace the retention assertions with endpoint prohibitions**
+- [x] **Step 6.2: Replace the retention assertions with endpoint prohibitions**
 
 Replace the tail of the script (current lines 31–34):
 
@@ -628,7 +628,7 @@ fi
 echo "no network telemetry found"
 ```
 
-- [ ] **Step 6.3: Run the guard, then prove it can fail**
+- [x] **Step 6.3: Run the guard, then prove it can fail**
 
 ```bash
 ./bin/check-no-network-telemetry.sh
@@ -638,7 +638,7 @@ Expected: `no network telemetry found`, exit 0.
 
 Negative check: append `// https://x.ai/cli` to `crates/codegen/xai-grok-update/src/lib.rs`, rerun, expect `upstream update endpoint survived` + exit 1, then revert with `git checkout -- crates/codegen/xai-grok-update/src/lib.rs`.
 
-- [ ] **Step 6.4: Commit**
+- [x] **Step 6.4: Commit**
 
 ```bash
 git add bin/check-no-network-telemetry.sh
@@ -652,7 +652,7 @@ git commit -m "chore(guard): forbid upstream update endpoints instead of protect
 **Files:**
 - Modify: `crates/codegen/xai-grok-shell/src/agent/auth_method.rs` (`build_unpinned` at 217–263; tests at 684–695, 863–894, 1027–1051)
 
-- [ ] **Step 7.1: Update the tests first (failing)**
+- [x] **Step 7.1: Update the tests first (failing)**
 
 Replace `fresh_user_only_advertises_grok_com_and_requires_login` (lines 684–695) with:
 
@@ -712,7 +712,7 @@ with:
         );
 ```
 
-- [ ] **Step 7.2: Run tests to verify they fail**
+- [x] **Step 7.2: Run tests to verify they fail**
 
 ```bash
 cargo test -p xai-grok-shell agent::auth_method
@@ -720,7 +720,7 @@ cargo test -p xai-grok-shell agent::auth_method
 
 Expected: FAIL — exactly the three updated tests (methods currently contain grok.com).
 
-- [ ] **Step 7.3: Make build_unpinned conditional**
+- [x] **Step 7.3: Make build_unpinned conditional**
 
 In `build_unpinned` (only there — `build_pinned_oidc`'s call at lines 203–209 stays unconditional), replace:
 
@@ -767,7 +767,7 @@ with:
 
 (The `push_interactive_login` call inside `build_pinned_oidc` is preceded by different context — match on the `build_unpinned` body which contains the `has_cached_token` block directly above.)
 
-- [ ] **Step 7.4: Run the full auth_method test module**
+- [x] **Step 7.4: Run the full auth_method test module**
 
 ```bash
 cargo test -p xai-grok-shell agent::auth_method
@@ -775,7 +775,7 @@ cargo test -p xai-grok-shell agent::auth_method
 
 Expected: PASS — including the untouched `auth_provider_command_sets_external_provider_meta` (explicit config keeps grok.com), `enterprise_oidc_replaces_grok_com_but_xai_api_key_still_first`, `session_only_user_first_method_is_cached_token`, and both `pin_oidc_*` tests.
 
-- [ ] **Step 7.5: Commit**
+- [x] **Step 7.5: Commit**
 
 ```bash
 git add crates/codegen/xai-grok-shell/src/agent/auth_method.rs
@@ -793,7 +793,7 @@ oidc pin) are unchanged."
 **Files:**
 - Modify: `crates/codegen/xai-grok-pager/src/acp/mod.rs` (`eager_auth_or_login_fallback` at 646–707; tests module)
 
-- [ ] **Step 8.1: Write failing tests for the new pure fallback helper**
+- [x] **Step 8.1: Write failing tests for the new pure fallback helper**
 
 Add to the existing `#[cfg(test)] mod tests` in `acp/mod.rs` (near `shell_built_auth_methods_for_byok_user_skip_login_screen`):
 
@@ -838,7 +838,7 @@ Add to the existing `#[cfg(test)] mod tests` in `acp/mod.rs` (near `shell_built_
     }
 ```
 
-- [ ] **Step 8.2: Run to verify failure**
+- [x] **Step 8.2: Run to verify failure**
 
 ```bash
 cargo test -p xai-grok-pager --lib acp::tests::login_fallback
@@ -846,7 +846,7 @@ cargo test -p xai-grok-pager --lib acp::tests::login_fallback
 
 Expected: compile FAIL — `login_fallback_outcome` not found.
 
-- [ ] **Step 8.3: Implement the helper and rewire eager_auth_or_login_fallback**
+- [x] **Step 8.3: Implement the helper and rewire eager_auth_or_login_fallback**
 
 Insert above `eager_auth_or_login_fallback` (after `find_interactive_login_method`, ~line 644):
 
@@ -944,7 +944,7 @@ with:
 /// error and the welcome screen shows a credentials hint.
 ```
 
-- [ ] **Step 8.4: Run the acp tests**
+- [x] **Step 8.4: Run the acp tests**
 
 ```bash
 cargo test -p xai-grok-pager --lib acp::
@@ -952,7 +952,7 @@ cargo test -p xai-grok-pager --lib acp::
 
 Expected: PASS — the four new tests plus all existing `startup_auth_*` and `shell_built_auth_methods_for_byok_user_skip_login_screen` tests.
 
-- [ ] **Step 8.5: Commit**
+- [x] **Step 8.5: Commit**
 
 ```bash
 git add crates/codegen/xai-grok-pager/src/acp/mod.rs
@@ -967,7 +967,7 @@ git commit -m "feat(pager): land in app when no interactive login is advertised"
 - Modify: `crates/codegen/xai-grok-pager/src/startup.rs`
 - Modify: `crates/codegen/xai-grok-pager/src/app/event_loop.rs` (immediately after the startup-warnings assembly block that ends at line 979)
 
-- [ ] **Step 9.1: Write the failing test for the pure helper**
+- [x] **Step 9.1: Write the failing test for the pure helper**
 
 In `crates/codegen/xai-grok-pager/src/startup.rs`, add at the end of the file (create the test module if none exists):
 
@@ -988,7 +988,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 9.2: Run to verify failure**
+- [x] **Step 9.2: Run to verify failure**
 
 ```bash
 cargo test -p xai-grok-pager --lib startup::
@@ -996,7 +996,7 @@ cargo test -p xai-grok-pager --lib startup::
 
 Expected: compile FAIL — `no_credentials_hint` not found.
 
-- [ ] **Step 9.3: Implement the helper**
+- [x] **Step 9.3: Implement the helper**
 
 Add to `startup.rs` (above the test module):
 
@@ -1020,7 +1020,7 @@ pub fn no_credentials_hint(auth_methods_empty: bool) -> Option<StartupWarning> {
 
 If `WarningSeverity` does not yet derive the traits the test needs, extend its derive to `#[derive(Debug, Clone, Copy, PartialEq, Eq)]` (it already has exactly this per startup.rs:21 — no change expected).
 
-- [ ] **Step 9.4: Run the helper test**
+- [x] **Step 9.4: Run the helper test**
 
 ```bash
 cargo test -p xai-grok-pager --lib startup::
@@ -1028,7 +1028,7 @@ cargo test -p xai-grok-pager --lib startup::
 
 Expected: PASS.
 
-- [ ] **Step 9.5: Wire it into the event loop**
+- [x] **Step 9.5: Wire it into the event loop**
 
 In `crates/codegen/xai-grok-pager/src/app/event_loop.rs`, directly after the closing brace of the startup-warnings block (the `{ ... app.startup_warnings = crate::diagnostics::assemble_startup_warnings(...); }` block ending at line 979 — the hint must come AFTER that assignment or it would be overwritten), insert:
 
@@ -1042,7 +1042,7 @@ In `crates/codegen/xai-grok-pager/src/app/event_loop.rs`, directly after the clo
 
 (`app.auth_methods` was populated from connection metadata at line 633; empty means no env key, no cached token, no BYOK provider key, and no configured interactive login.)
 
-- [ ] **Step 9.6: Build and lint the pager**
+- [x] **Step 9.6: Build and lint the pager**
 
 ```bash
 cargo check -p xai-grok-pager && cargo clippy -p xai-grok-pager --lib
@@ -1050,7 +1050,7 @@ cargo check -p xai-grok-pager && cargo clippy -p xai-grok-pager --lib
 
 Expected: clean.
 
-- [ ] **Step 9.7: Commit**
+- [x] **Step 9.7: Commit**
 
 ```bash
 git add crates/codegen/xai-grok-pager/src/startup.rs crates/codegen/xai-grok-pager/src/app/event_loop.rs
@@ -1063,7 +1063,7 @@ git commit -m "feat(pager): passive credentials hint on credential-less first ru
 
 **Files:** none (verification only)
 
-- [ ] **Step 10.1: Guard scripts**
+- [x] **Step 10.1: Guard scripts**
 
 ```bash
 ./bin/check-no-network-telemetry.sh
@@ -1071,7 +1071,7 @@ git commit -m "feat(pager): passive credentials hint on credential-less first ru
 
 Expected: `no network telemetry found`, exit 0.
 
-- [ ] **Step 10.2: Affected crate test suites**
+- [x] **Step 10.2: Affected crate test suites**
 
 ```bash
 cargo test -p xai-grok-update
@@ -1081,7 +1081,7 @@ cargo test -p xai-grok-pager --lib
 
 Expected: all PASS. Notable canaries: `shell_built_auth_methods_for_byok_user_skip_login_screen` (BYOK unchanged), `pin_oidc_*` (explicit pin unchanged), `welcome_pending_*` key tests in app_view.rs (the Pending state still exists for explicitly configured logins — these tests set the state directly and must keep passing).
 
-- [ ] **Step 10.3: Full binary builds**
+- [x] **Step 10.3: Full binary builds**
 
 ```bash
 cargo check -p xai-grok-pager-bin
