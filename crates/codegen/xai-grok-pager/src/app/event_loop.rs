@@ -690,18 +690,11 @@ pub(crate) async fn run(
     // else: auth_state defaults to Done (already authenticated eagerly)
     // Effects stashed until after the initial render, so the user sees the
     // welcome/auth UI right away.
+    // In groky's world needs_interactive_login implies auth_methods is
+    // non-empty (startup_auth_metadata returns needs_login=false for
+    // empty methods, and --force-login also gates on non-empty methods).
     let mut post_render_effects = if needs_interactive_login {
-        if connection.auth_methods.is_empty() {
-            // preferred_method pin unavailable — no advertised method to start.
-            app.auth_state = super::app_view::AuthState::Pending {
-                error: Some(
-                    xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string(),
-                ),
-            };
-            vec![]
-        } else {
-            dispatch::dispatch(Action::Login, &mut app)
-        }
+        dispatch::dispatch(Action::Login, &mut app)
     } else {
         vec![]
     };
@@ -976,6 +969,12 @@ pub(crate) async fn run(
                 .into_iter()
                 .collect(),
         );
+    }
+
+    // groky: a credential-less start lands in the app (no login screen).
+    // Surface a passive hint in the welcome view's startup-warning slot.
+    if let Some(hint) = crate::startup::no_credentials_hint(app.auth_methods.is_empty()) {
+        app.startup_warnings.push(hint);
     }
 
     // Apply initial config (may come from existing ~/.grok/pager.toml).

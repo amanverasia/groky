@@ -1674,10 +1674,13 @@ fn render_welcome_done(
     // Heights that don't depend on the menu — computed first so the menu
     // builder can probe the layout to decide whether to add a Changelog row.
     // Startup-warning hint height (multi-line aware).
-    let hint_height = p.startup_warnings.first().map_or(0u16, |w| {
+    // Height for all visible startup warnings (import-claude entries are
+    // skipped in render, but they never appear in groky's start-up so
+    // counting them here is harmless for layout over-provision).
+    let hint_height = p.startup_warnings.iter().fold(0u16, |acc, w| {
         let msg_lines = w.message.lines().count() as u16;
         let action_line = if w.action.is_some() { 1 } else { 0 };
-        msg_lines + action_line + 1 // +1 for buffer spacing
+        acc + msg_lines + action_line + 1 // +1 for buffer spacing
     });
     let has_update_tip = p.pending_update_version.is_some();
     let has_resume_tip = !has_update_tip && p.foreign_resume_hint.is_some();
@@ -2424,51 +2427,54 @@ fn render_auth_input_box(area: Rect, buf: &mut Buffer, theme: &Theme, input: &st
     }
 }
 
-/// Render the first startup warning centered in the given area.
+/// Render all startup warnings stacked vertically. Each entry gets one
+/// message line, one optional action line, plus a buffer row for spacing.
+/// Severity controls color (yellow for `Warning`, dim for `Info`).
 ///
-/// `startup_warnings` can hold more than one entry (the WezTerm
-/// kitty-keyboard banner is prepended ahead of `summarize_warnings()`
-/// output — see `diagnostics::assemble_startup_warnings`), but only the
-/// first is rendered; all of them point at `/terminal-setup`, which lists
-/// every issue. One message line, one optional action line, plus a buffer
-/// row for spacing. Severity controls color (yellow for `Warning`, dim
-/// for `Info`).
+/// Import-Claude entries are skipped: the import row in the menu already
+/// carries the call-to-action.
 fn render_startup_warnings(
     area: Rect,
     buf: &mut Buffer,
     theme: &Theme,
     warnings: &[StartupWarning],
 ) -> Option<Rect> {
-    let w = warnings.first()?;
-
-    // Skip the import-claude startup warning entirely — the import row in the
-    // menu now carries the call-to-action with the same visual weight as
-    // every other welcome menu item. Showing the warning text in addition to
-    // the menu row would be redundant noise.
-    if w.message.starts_with("Import Claude settings")
-        || w.message.starts_with("Claude settings detected")
-    {
+    // Filter out import-claude entries which are already rendered in the menu.
+    let relevant: Vec<&StartupWarning> = warnings
+        .iter()
+        .filter(|w| {
+            !w.message.starts_with("Import Claude settings")
+                && !w.message.starts_with("Claude settings detected")
+        })
+        .collect();
+    if relevant.is_empty() {
         return None;
     }
-    let color = match w.severity {
-        crate::startup::WarningSeverity::Warning => theme.warning,
-        crate::startup::WarningSeverity::Info => theme.gray_dim,
-    };
-    let style = Style::default().fg(color);
 
-    let mut lines: Vec<Line<'_>> = w
-        .message
-        .lines()
-        .map(|l| Line::from(Span::styled(l, style)).alignment(Alignment::Center))
-        .collect();
-    if let Some(ref action) = w.action {
-        lines.push(Line::from(Span::styled(action.as_str(), style)).alignment(Alignment::Center));
+    let mut all_lines: Vec<Line<'_>> = Vec::new();
+    for (i, w) in relevant.iter().enumerate() {
+        let color = match w.severity {
+            crate::startup::WarningSeverity::Warning => theme.warning,
+            crate::startup::WarningSeverity::Info => theme.gray_dim,
+        };
+        let style = Style::default().fg(color);
+        for line in w.message.lines() {
+            all_lines.push(Line::from(Span::styled(line, style)).alignment(Alignment::Center));
+        }
+        if let Some(ref action) = w.action {
+            all_lines.push(
+                Line::from(Span::styled(action.as_str(), style)).alignment(Alignment::Center),
+            );
+        }
+        // buffer row between entries (skip after last)
+        if i + 1 < relevant.len() {
+            all_lines.push(Line::from(""));
+        }
     }
 
-    Paragraph::new(lines).render(area, buf);
+    Paragraph::new(all_lines).render(area, buf);
     None
 }
-
 fn mask_auth_token_for_display(input: &str) -> String {
     use crate::render::line_utils::floor_char_boundary;
 

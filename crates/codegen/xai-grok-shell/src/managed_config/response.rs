@@ -42,7 +42,7 @@ pub enum ManagedConfigError {
     )]
     DeploymentKeyRejected,
     #[error(
-        "Your team sign-in was rejected. It may have expired or lack access. Run `grok login` to sign in again."
+        "Your team sign-in was rejected. It may have expired or lack access. Run `groky login` to sign in again."
     )]
     TeamAuthRejected,
     #[error("The server returned an unexpected error (HTTP {status}). Try again in a few minutes.")]
@@ -58,7 +58,7 @@ pub enum ManagedConfigError {
     )]
     SignatureRejected,
     #[error(
-        "Can't save the configuration to ~/.grok. Make sure the directory exists and is writable.\n  ({0})"
+        "Can't save the configuration to ~/.groky. Make sure the directory exists and is writable.\n  ({0})"
     )]
     DiskWrite(#[from] std::io::Error),
 }
@@ -195,6 +195,19 @@ pub(super) fn verify_signed_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emitted_auth_and_disk_guidance_uses_current_cli_and_home() {
+        assert_eq!(
+            ManagedConfigError::TeamAuthRejected.to_string(),
+            "Your team sign-in was rejected. It may have expired or lack access. Run `groky login` to sign in again."
+        );
+        assert_eq!(
+            ManagedConfigError::DiskWrite(std::io::Error::other("read-only filesystem"))
+                .to_string(),
+            "Can't save the configuration to ~/.groky. Make sure the directory exists and is writable.\n  (read-only filesystem)"
+        );
+    }
 
     /// Picking: the first trusted-key_id entry wins; no trusted entry → the first entry
     /// (picking must not invent absence); no array (old/unsigned server) → None.

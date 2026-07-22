@@ -440,7 +440,7 @@ async fn run_headless_inner(
 
     // Headless's only transport is the relay (no IPC fallback), so a session is required.
     const HEADLESS_NO_SESSION: &str = "Headless mode requires a grok.com session. \
-        Run `grok login` to sign in, or use `grok agent stdio` for API-key access.";
+        Run `groky login` to sign in, or use `groky agent stdio` for API-key access.";
 
     // Clean up orphaned upload queue temp files from previous sessions (best-effort).
     // Uses DEFAULT_MAX_AGE to stay in sync with the upload queue's retry policy.
@@ -459,9 +459,9 @@ async fn run_headless_inner(
         match auth_manager.current() {
             Some(auth) => (auth, false),
             None if auth_manager.is_expired() => {
-                anyhow::bail!("Session expired. Please run 'grok login' to re-authenticate.")
+                anyhow::bail!("Session expired. Please run 'groky login' to re-authenticate.")
             }
-            None => anyhow::bail!("No cached credentials found. Run `grok login`."),
+            None => anyhow::bail!("No cached credentials found. Run `groky login`."),
         }
     } else if reauthenticate {
         let auth_manager = Arc::new(AuthManager::new(&grok_home::grok_home(), ctx.clone()));
@@ -1710,6 +1710,22 @@ mod tests {
                 })
             }),
         }
+    }
+
+    #[test]
+    fn headless_auth_guidance_uses_current_cli_commands() {
+        let production_source = include_str!("app.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source contains production code before the test module");
+        assert!(production_source.contains(
+            "Run `groky login` to sign in, or use `groky agent stdio` for API-key access."
+        ));
+        assert!(
+            production_source
+                .contains("Session expired. Please run 'groky login' to re-authenticate.")
+        );
+        assert!(production_source.contains("No cached credentials found. Run `groky login`."));
     }
 
     // ===== relay shared-manager seeding tests =====

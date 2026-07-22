@@ -1489,7 +1489,7 @@ async fn permanent_failure_reads_absent_after_clear_so_auth_reports_not_logged_i
     mgr.clear().unwrap();
 
     // The diagnostic the user now sees on the next request should be
-    // "Not logged in. Run `grok login`.", not the stale invalid_grant.
+    // "Not logged in. Run `groky login`.", not the stale invalid_grant.
     let err = mgr.auth().await.unwrap_err();
     assert!(
         matches!(err, AuthError::NotLoggedIn),

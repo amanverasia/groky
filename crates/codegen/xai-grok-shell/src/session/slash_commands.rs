@@ -1552,6 +1552,7 @@ mod tests {
                 "dream",
                 "memory",
                 "context",
+                "providers",
                 "hooks-trust",
                 "hooks-list",
                 "hooks-add",
