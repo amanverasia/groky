@@ -1,30 +1,12 @@
 use std::time::Duration;
 
-use anyhow::Result;
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::fs;
-use tokio::process::Command;
 
 use xai_grok_shell::env::GrokBuildEnvironment;
 use xai_grok_shell::util::grok_home::grok_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
-const NPM_PACKAGE: &str = "@xai-official/grok";
-pub const GH_RELEASE_REPO: &str = "xai-org-shared/grok-build";
-
-/// Primary CLI base URL: Cloudflare-fronted x.ai endpoint with edge caching
-/// for binaries and origin-respecting no-cache for channel pointers.
-pub(crate) const CLI_BASE_URL_PRIMARY: &str = "https://x.ai/cli";
-
-/// Fallback CLI base URL: direct GCS, used when the primary is unreachable
-/// (Cloudflare outage, regional CF egress issue, DNS hijack, etc.).
-pub(crate) const CLI_BASE_URL_FALLBACK: &str =
-    "https://storage.googleapis.com/grok-build-public-artifacts/cli";
-
-/// CLI base URLs in preference order. Callers (channel-pointer fetch, binary
-/// download, in-app updater) try each in turn and stop at the first success.
-pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_FALLBACK];
 
 /// Minimal configuration the update system needs from the environment.
 ///
@@ -33,7 +15,7 @@ pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_F
 /// about the `GrokBuildEnvironment` enum directly.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
-    /// Chat API proxy base URL (versioned `https://cli-chat-proxy.grok.com/v1` endpoint).
+    /// Chat API proxy base URL (no longer used — kept for API compatibility with callers).
     pub proxy_base_url: String,
     /// Auth scope key for `~/.grok/auth.json`.
     pub auth_scope: String,
@@ -73,11 +55,9 @@ impl GrokVersion {
         if let Ok(dt) = time::OffsetDateTime::parse(
             &self.checked_at,
             &time::format_description::well_known::Rfc3339,
-        ) {
+        ) && dt <= now
+        {
             // Clock-skew guard: future timestamps are never fresh.
-            if dt > now {
-                return false;
-            }
             now - dt < ttl
         } else {
             false
@@ -93,260 +73,6 @@ impl GrokVersion {
             stable_version,
             checked_at,
         }
-    }
-}
-
-/// Return the semver-greater of two version strings.
-fn semver_max(a: &str, b: &str) -> Result<String> {
-    let va = semver::Version::parse(a)?;
-    let vb = semver::Version::parse(b)?;
-    Ok(std::cmp::max(va, vb).to_string())
-}
-
-/// Fetch the latest version from npm registry using `npm view`.
-/// For alpha channel, fetches both `@alpha` and `@latest` dist-tags and
-/// returns the semver-greater — prevents alpha users getting stuck when a
-/// newer stable ships without updating the alpha dist-tag.
-async fn fetch_npm_version(channel: &str, npm_registry: Option<&str>) -> Result<String> {
-    if channel == "alpha" {
-        let (alpha_v, stable_v) = tokio::try_join!(
-            fetch_npm_tag("alpha", npm_registry),
-            fetch_npm_tag("latest", npm_registry),
-        )?;
-        return semver_max(&alpha_v, &stable_v);
-    }
-    fetch_npm_tag("latest", npm_registry).await
-}
-
-/// Test-only entry point: invokes the private [`fetch_npm_tag`] for tests
-/// that swap in a fake `npm` via PATH.
-#[doc(hidden)]
-pub async fn fetch_npm_tag_for_test(tag: &str, npm_registry: Option<&str>) -> Result<String> {
-    fetch_npm_tag(tag, npm_registry).await
-}
-
-/// Test-only entry point: invokes the private [`fetch_npm_version`] for tests
-/// that swap in a fake `npm` via PATH.
-#[doc(hidden)]
-pub async fn fetch_npm_version_for_test(
-    channel: &str,
-    npm_registry: Option<&str>,
-) -> Result<String> {
-    fetch_npm_version(channel, npm_registry).await
-}
-
-async fn fetch_npm_tag(tag: &str, npm_registry: Option<&str>) -> Result<String> {
-    let pkg_spec = if tag == "latest" {
-        NPM_PACKAGE.to_string()
-    } else {
-        format!("{}@{}", NPM_PACKAGE, tag)
-    };
-    let mut args = vec!["view", &pkg_spec, "version", "--json"];
-    let registry_flag;
-    if let Some(registry) = npm_registry {
-        registry_flag = format!("--registry={}", registry);
-        args.push(&registry_flag);
-    }
-    let mut cmd = Command::new("npm");
-    cmd.args(&args).stdin(std::process::Stdio::null());
-    xai_grok_tools::util::detach_command(&mut cmd);
-    cmd.envs(xai_grok_tools::util::pager_env());
-    let output = cmd.output().await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("npm view @{} failed: {}", tag, stderr.trim());
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let value: Value = serde_json::from_str(stdout.trim())?;
-    match value {
-        Value::String(version) => Ok(version),
-        Value::Array(values) => values
-            .iter()
-            .rev()
-            .find_map(|entry| entry.as_str().map(|item| item.to_string()))
-            .ok_or_else(|| anyhow::anyhow!("npm view @{} returned empty version list", tag)),
-        _ => anyhow::bail!("npm view @{} returned unexpected JSON", tag),
-    }
-}
-
-/// Fetch the latest version from GitHub Releases using `gh release list`.
-/// For alpha channel, fetches both pre-release and stable-only, returns the
-/// semver-greater — `gh release list --limit 1` orders by publication date,
-/// not semver, so we need both to guarantee correctness.
-#[doc(hidden)]
-pub async fn fetch_gh_release_version(channel: &str) -> Result<String> {
-    if channel == "alpha" {
-        let (with_pre, stable_only) = tokio::try_join!(
-            fetch_gh_release_latest(false),
-            fetch_gh_release_latest(true),
-        )?;
-        return semver_max(&with_pre, &stable_only);
-    }
-    fetch_gh_release_latest(true).await
-}
-
-async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
-    let mut args = vec![
-        "release",
-        "list",
-        "--repo",
-        GH_RELEASE_REPO,
-        "--limit",
-        "1",
-        "--exclude-drafts",
-        "--json",
-        "tagName",
-        "--jq",
-        ".[0].tagName",
-    ];
-    if exclude_pre {
-        args.push("--exclude-pre-releases");
-    }
-    let mut cmd = Command::new("gh");
-    cmd.args(&args).stdin(std::process::Stdio::null());
-    xai_grok_tools::util::detach_command(&mut cmd);
-    cmd.envs(xai_grok_tools::util::pager_env());
-    let output = cmd.output().await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("gh release list failed: {}", stderr.trim());
-    }
-
-    let tag = String::from_utf8(output.stdout)?.trim().to_string();
-    // Tags are formatted as "v0.1.141", strip the leading "v"
-    let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-    if version.is_empty() {
-        anyhow::bail!("No releases found in {}", GH_RELEASE_REPO);
-    }
-    Ok(version)
-}
-
-/// Fetch the latest version from a public CLI channel pointer.
-///
-/// Reads `{base}/{channel}` which contains a plain-text semver string
-/// (e.g. `0.1.181`). No auth required — the upstream bucket is public.
-///
-/// For the alpha channel, fetches both `alpha` and `stable` pointers and
-/// returns the semver-greater, matching the behavior of the npm and
-/// gh-release paths.
-///
-/// Tries each base URL in [`CLI_BASE_URLS`] in order and stops at the first
-/// success. Each individual base also retries up to 3 times with exponential
-/// backoff (1s, 2s, 4s) on transient failures before falling through to the
-/// next base.
-pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
-    let mut last_err: Option<anyhow::Error> = None;
-    for (i, base) in CLI_BASE_URLS.iter().enumerate() {
-        match fetch_gcs_version_from_base(channel, base).await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                if i + 1 < CLI_BASE_URLS.len() {
-                    tracing::warn!(
-                        "channel pointer fetch from {} failed ({:#}); trying next base URL",
-                        base,
-                        e
-                    );
-                }
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no CLI base URLs configured")))
-}
-
-/// Test-only entry point: same as [`fetch_gcs_version`] but reads from
-/// `base_url` instead of the hardcoded GCS bucket.
-#[doc(hidden)]
-pub async fn fetch_gcs_version_from_base(channel: &str, base_url: &str) -> Result<String> {
-    if channel == "alpha" {
-        let (alpha_v, stable_v) = tokio::try_join!(
-            fetch_gcs_channel_pointer("alpha", base_url),
-            fetch_gcs_channel_pointer("stable", base_url),
-        )?;
-        return semver_max(&alpha_v, &stable_v);
-    }
-    fetch_gcs_channel_pointer(channel, base_url).await
-}
-
-async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<String> {
-    let url = format!("{}/{}", base_url, channel);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
-
-    let max_retries: u32 = 3;
-    let mut last_err = None;
-    for attempt in 0..=max_retries {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
-        }
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = Some(anyhow::anyhow!(
-                    "GCS channel pointer fetch failed for {}: {:#}",
-                    url,
-                    e
-                ));
-                continue;
-            }
-        };
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            last_err = Some(anyhow::anyhow!(
-                "GCS channel pointer fetch failed: HTTP {} for {}: {}",
-                status,
-                url,
-                body.chars().take(200).collect::<String>().trim()
-            ));
-            continue;
-        }
-        match resp.text().await {
-            Ok(body) => {
-                let version = body.trim().to_string();
-                if version.is_empty() {
-                    last_err = Some(anyhow::anyhow!(
-                        "empty {} channel pointer at {}",
-                        channel,
-                        url
-                    ));
-                    continue;
-                }
-                if semver::Version::parse(&version).is_err() {
-                    anyhow::bail!(
-                        "invalid semver in {} channel pointer: '{}'",
-                        channel,
-                        version
-                    );
-                }
-                return Ok(version);
-            }
-            Err(e) => {
-                last_err = Some(anyhow::anyhow!(
-                    "GCS channel pointer body read failed for {}: {:#}",
-                    url,
-                    e
-                ));
-                continue;
-            }
-        }
-    }
-    Err(last_err.unwrap())
-}
-
-/// Fetch the latest version for the given installer type without writing the
-/// version cache. Use this when the caller needs to control when the cache is
-/// written (e.g. auto-update should only cache after a successful install or
-/// when no update is needed).
-pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
-    match installer {
-        "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
-        "gh-release" => fetch_gh_release_version(&config.channel).await,
-        _ => fetch_gcs_version(&config.channel).await,
     }
 }
 
@@ -387,20 +113,6 @@ pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
     }
 }
 
-/// Fetch the latest version for the given installer type and cache it.
-///
-/// Each installer is fully independent — no cross-installer fallback.
-///
-/// - `"npm"` — uses `npm view` against the public registry.
-/// - `"internal"` — reads the channel pointer from the public GCS bucket.
-/// - `"gh-release"` — uses `gh release list` against GitHub Releases.
-pub async fn get_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
-    let version = fetch_latest_version(installer, config).await?;
-    let stable_ptr = try_fetch_stable_pointer().await;
-    write_version_cache(&version, stable_ptr.as_deref()).await;
-    Ok(version)
-}
-
 /// True if `version.json` exists and is within TTL.
 pub async fn is_version_cache_fresh() -> bool {
     let version_path = grok_home().join("version.json");
@@ -416,19 +128,20 @@ pub async fn is_version_cache_fresh() -> bool {
 
 pub use xai_grok_version::installed as get_installed_grok_version;
 
-/// Version of the managed grok binary currently on disk, read from the
-/// `~/.grok/bin/grok` symlink target (`../downloads/grok-<version>-<platform>`)
-/// without exec'ing anything.
+/// Return the running binary's version as read off the disk (the versioned
+/// binary name behind the `~/.grok/bin/groky` symlink).
 ///
-/// Concurrent updaters (TUI background download, leader hourly checker,
-/// explicit `grok update`) decide staleness from this instead of their own
-/// compiled-in version, so a binary another process already installed is
-/// never downloaded a second time.
+/// Returns `None` when there is no managed install on disk — e.g. the user
+/// installed the raw binary or compiled from source. The version cache
+/// (`write_version_cache`) is the only persistent source then, so callers must
+/// not assume the absence of a symlink means "no version data" and should fall
+/// back to the cache or compile-time VERSION.
 ///
-/// Returns `None` when there is no parseable managed symlink (Windows
-/// copy-based installs, dev builds) or when the symlink is DANGLING — a
-/// link whose target binary was deleted (e.g. manual `~/.grok/downloads`
-/// cleanup) must not report an installed version, or every updater would
+/// On Unix, `grok_application()` resolves to `~/.grok/bin/groky` (or a
+/// configured `groky_path_exec`). We readlink it, extract the target filename
+/// (e.g. `groky-0.1.150-linux-x64`), parse out the version portion with
+/// `version_from_versioned_binary_name`, and then **verify the target exists**
+/// via metadata() — a dangling link means the binary was deleted and must not
 /// claim "already up to date" forever while no runnable binary exists.
 /// NOTE: the symlink existing does not prove the *active installer*
 /// maintains it — npm manages its own global install and a leftover symlink
@@ -443,7 +156,7 @@ pub fn installed_on_disk_version() -> Option<String> {
         // metadata() follows the symlink: Err means the target is gone
         // (dangling link) and the version it names is not actually on disk.
         std::fs::metadata(&app).ok()?;
-        version_from_versioned_binary_name(target.file_name()?.to_str()?, "grok")
+        version_from_versioned_binary_name(target.file_name()?.to_str()?, "groky")
     }
     #[cfg(not(unix))]
     {
@@ -474,31 +187,6 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
     let ver_str = parts[..platform_start].join("-");
     semver::Version::parse(&ver_str).ok()?;
     Some(ver_str)
-}
-
-/// Fetch the stable channel pointer for caching alongside the version.
-///
-/// Tries each base URL in [`CLI_BASE_URLS`] and returns the first success.
-/// Best-effort: returns `None` on any failure (the caller will simply omit
-/// the stable pointer from the cache, and `channel_label()` will return `""`
-/// until the next successful fetch).
-///
-/// The entire operation is capped at 500 ms. The stable pointer is only used
-/// to derive the `[alpha]`/`[stable]` channel label — it is never required
-/// for correctness. On slow or unreachable networks the timeout fires and we
-/// return `None`; the label will populate on the next successful TTL check
-/// (~30 min). This keeps startup and post-install paths fast.
-pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
-    tokio::time::timeout(Duration::from_millis(500), async {
-        for base in CLI_BASE_URLS {
-            if let Ok(v) = fetch_gcs_channel_pointer("stable", base).await {
-                return Some(v);
-            }
-        }
-        None
-    })
-    .await
-    .unwrap_or(None)
 }
 
 /// Read the cached stable version from `~/.grok/version.json` (sync, for display).
@@ -545,7 +233,8 @@ pub fn channel_name() -> Option<&'static str> {
 /// Channel label derived from the cached stable pointer.
 ///
 /// Compares the compiled-in `VERSION` against the stable pointer stored in
-/// `~/.grok/version.json` (written by the auto-updater):
+/// `~/.grok/version.json` (written by a previous upstream-grok auto-updater
+/// run, if any):
 /// - `" [alpha]"` when the current version is ahead of stable,
 /// - `" [stable]"` when at or behind stable,
 /// - `""` when no cached pointer is available (first launch, old cache format).
@@ -666,43 +355,6 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // semver_max — invariant matrix
-    // ──────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_semver_max_matrix() {
-        // (a, b, expected)
-        let cases: &[(&str, &str, &str)] = &[
-            ("0.1.140", "0.1.140", "0.1.140"),                         // equal
-            ("0.1.140", "0.1.141", "0.1.141"),                         // b higher
-            ("0.1.141", "0.1.140", "0.1.141"),                         // a higher
-            ("0.1.148-alpha.3", "0.1.148", "0.1.148"),                 // release > pre-release
-            ("0.1.148", "0.1.148-alpha.3", "0.1.148"),                 // commutative
-            ("0.1.148-alpha.1", "0.1.148-alpha.3", "0.1.148-alpha.3"), // pre-release ordering
-            ("0.1.149-alpha.1", "0.1.148", "0.1.149-alpha.1"),         // higher base wins
-            ("0.0.0", "0.0.1", "0.0.1"),                               // zero versions
-            ("0.99.99", "1.0.0", "1.0.0"),                             // major jump
-        ];
-
-        for (a, b, expected) in cases {
-            assert_eq!(
-                semver_max(a, b).unwrap(),
-                *expected,
-                "semver_max({:?}, {:?})",
-                a,
-                b,
-            );
-        }
-    }
-
-    #[test]
-    fn test_semver_max_invalid_input_returns_err() {
-        assert!(semver_max("garbage", "0.1.141").is_err());
-        assert!(semver_max("0.1.141", "garbage").is_err());
-        assert!(semver_max("foo", "bar").is_err());
-    }
-
-    // ──────────────────────────────────────────────────────────────────────
     // GrokVersion JSON shape — backward compatibility invariants
     // ──────────────────────────────────────────────────────────────────────
 
@@ -714,15 +366,11 @@ mod tests {
         assert_eq!(v.version, "0.1.180");
         assert!(v.stable_version.is_none());
 
-        // New format with stable_version round-trips correctly.
-        let now = time::OffsetDateTime::now_utc();
-        let new = GrokVersion::new("0.2.5".to_string(), Some("0.2.3".to_string()), now);
-        let json = serde_json::to_string(&new).unwrap();
-        let parsed: GrokVersion = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.version, "0.2.5");
-        assert_eq!(parsed.stable_version.as_deref(), Some("0.2.3"));
-
-        // checked_at must be valid RFC3339.
+        // New format: all fields populated.
+        let new = r#"{"version":"0.1.220-alpha.2","stable_version":"0.1.219","checked_at":"2026-04-22T10:30:00Z"}"#;
+        let parsed: GrokVersion = serde_json::from_str(new).unwrap();
+        assert_eq!(parsed.version, "0.1.220-alpha.2");
+        assert_eq!(parsed.stable_version.as_deref(), Some("0.1.219"));
         assert!(
             time::OffsetDateTime::parse(
                 &parsed.checked_at,

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Guard: no network-telemetry code, config, or dependencies may return.
-# Update/announcement networking is intentionally retained (asserted below).
+# The updater is a local-only facade: upstream endpoints must not return.
+# Announcement types are local-only persistence (no HTTP).
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -28,7 +29,20 @@ if rg -n '^name = "(sentry|opentelemetry|opentelemetry-otlp|opentelemetry-proto|
   echo "network telemetry dependency survived in lockfile" >&2; exit 1
 fi
 
-# Product networking intentionally retained.
+# The updater facade must stay present (API compatibility for upstream
+# syncs) but must never regain upstream endpoints or an HTTP client.
 rg -q 'xai-grok-update' Cargo.toml
 rg -q 'xai-grok-announcements' Cargo.toml
+
+forbidden_update='x\.ai/cli|grok-build-public-artifacts|@xai-official/grok|xai-org-shared/grok-build'
+if rg -n "$forbidden_update" crates/codegen/xai-grok-update/src; then
+  echo "upstream update endpoint survived in xai-grok-update" >&2; exit 1
+fi
+if rg -n "$forbidden_update" crates/codegen/xai-grok-pager/scripts; then
+  echo "upstream update endpoint survived in xai-grok-pager scripts" >&2; exit 1
+fi
+if rg -n '^\s*reqwest\s*=' crates/codegen/xai-grok-update/Cargo.toml; then
+  echo "HTTP client returned to xai-grok-update" >&2; exit 1
+fi
+
 echo "no network telemetry found"
