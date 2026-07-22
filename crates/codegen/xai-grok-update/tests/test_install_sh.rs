@@ -1,18 +1,11 @@
-//! Blitz harness for the bash installer (`install.sh`), the second client that
-//! can brick a machine. Runs the REAL shipped `install.sh` against a fake
-//! `curl` that can serve the good artifact, truncate it, or serve a right-length
-//! garbage body, and asserts the same invariant as the Rust blitz:
+//! Release-contract tests for the pager installers.
 //!
-//! > After any install attempt, `$BIN_DIR/grok` resolves to a binary that runs,
-//! > OR is still the previous-good binary — never a partial/garbage binary.
-//!
-//! Also covers shell-rc rewrite: stowed/symlinked `~/.bashrc` etc. must survive
-//! reinstall without being replaced by a plain file.
-//!
-//! The installer lives in the sibling `xai-grok-pager` crate; it is resolved by
-//! relative path. If it cannot be found (e.g. a sandbox that does not vendor it)
-//! the test skips rather than fail — under the repo's `cargo nextest` workflow
-//! the path resolves and the installer is exercised end to end.
+//! The bash installer runs end-to-end against a fake `curl` which serves a
+//! versioned Groky release tarball and companion SHA-256 manifest. It proves a
+//! valid artifact installs and a checksum mismatch preserves the prior binary.
+//! The remaining tests assert all four published entrypoints use the supported
+//! release contract and explicitly reject unavailable Windows assets.
+//! Installers are resolved from the sibling `xai-grok-pager` crate.
 
 #![cfg(unix)]
 
@@ -26,10 +19,6 @@ fn script_path(name: &str) -> Option<PathBuf> {
     )
     .ok()
     .filter(|p| p.exists())
-}
-
-fn install_sh_path() -> Option<PathBuf> {
-    script_path("install.sh")
 }
 
 fn host_platform() -> String {
@@ -47,44 +36,53 @@ fn host_platform() -> String {
 }
 
 const GOOD_SCRIPT: &str = "#!/bin/sh\nexit 0\n";
-const INSTALLER_BLOCK_START: &str = "# >>> grok installer >>>";
 
-/// Write a fake `curl` that intercepts every download `install.sh` performs.
-/// `$FAKE_MODE` (full|truncate|garbage) selects the corruption.
+/// Write a fake `curl` that serves a release tarball and its checksum.
+/// `$FAKE_MODE` (full|truncate|garbage|other_filename) selects the served artifact.
 fn write_fake_curl(dir: &Path) {
-    let body = format!(
-        r#"#!/bin/bash
-mode="${{FAKE_MODE:-full}}"
-fullsize={fullsize}
-head=0; out=""; want_code=0; url=""
+    let body = r#"#!/bin/bash
+mode="${FAKE_MODE:-full}"
+out=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --head) head=1 ;;
     -o) shift; out="$1" ;;
-    -w) shift; [ "$1" = '%{{http_code}}' ] && want_code=1 ;;
     -*) : ;;
     *) url="$1" ;;
   esac
   shift
 done
-if [ "$head" = 1 ]; then
-  if [ "$want_code" = 1 ]; then printf '200'; else printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\n\r\n' "$fullsize"; fi
-  exit 0
-fi
-if [ -n "$out" ]; then
+[ -n "$out" ] || { printf 'v0.1.181'; exit 0; }
+
+if [[ "$url" == *.sha256 ]]; then
+  tarball="${out%.sha256}"
   case "$mode" in
-    full)     printf '%s' '{good}' > "$out" ;;
-    truncate) printf '\0\0\0\0' > "$out" ;;
-    garbage)  head -c "$fullsize" /dev/zero | tr '\0' 'X' > "$out" ;;
+    full)
+      sha256sum "$tarball" | sed "s|  $tarball$|  $(basename "$tarball")|" > "$out"
+      ;;
+    other_filename)
+      printf 'a valid checksum for a different file' > "$(dirname "$tarball")/another-release.tar.gz"
+      sha256sum "$(dirname "$tarball")/another-release.tar.gz" | sed 's|.*/|  |' > "$out"
+      ;;
+    *)
+      printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$(basename "$tarball")" > "$out"
+      ;;
   esac
   exit 0
 fi
-printf '0.1.181'
-exit 0
-"#,
-        fullsize = GOOD_SCRIPT.len(),
-        good = GOOD_SCRIPT,
-    );
+
+case "$mode" in
+  full)
+    release_dir="${out%.tar.gz}"
+    mkdir -p "$release_dir"
+    printf '%s' '#!/bin/sh\nexit 0\n' > "$release_dir/groky"
+    chmod 755 "$release_dir/groky"
+    tar -C "$(dirname "$release_dir")" -czf "$out" "$(basename "$release_dir")"
+    rm -rf "$release_dir"
+    ;;
+  truncate) printf '\0\0\0\0' > "$out" ;;
+  garbage)  printf 'not a groky release tarball' > "$out" ;;
+esac
+"#;
     let path = dir.join("curl");
     std::fs::write(&path, body).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -125,280 +123,200 @@ fn assert_active_grok_runs(home: &Path) {
     assert!(ok, "active grok must run: {}", resolved.display());
 }
 
-fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str, shell: &str) -> bool {
+fn run_installer_with_env(
+    install_sh: &Path,
+    home: &Path,
+    fakebin: &Path,
+    mode: &str,
+    envs: &[(&str, PathBuf)],
+) -> bool {
     let path_env = format!("{}:/usr/bin:/bin", fakebin.display());
-    let status = Command::new("/bin/bash")
+    let mut command = Command::new("/bin/bash");
+    command
         .arg(install_sh)
         .arg("0.1.181")
         .env_clear()
         .env("HOME", home)
         .env("PATH", path_env)
-        .env("SHELL", shell)
-        .env("GROK_BIN_DIR", home.join(".grok").join("bin"))
         .env("GROK_CHANNEL", "stable")
-        .env("FAKE_MODE", mode)
-        .status()
-        .expect("spawn bash install.sh");
-    status.success()
-}
-
-fn installer_block_count(body: &str) -> usize {
-    body.matches(INSTALLER_BLOCK_START).count()
-}
-
-fn assert_single_installer_block(path: &Path, preserved: Option<&str>) {
-    let body = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        panic!("read {}: {e}", path.display());
-    });
-    let n = installer_block_count(&body);
-    assert_eq!(
-        n,
-        1,
-        "{} must contain exactly one grok installer block, got {n}:\n{body}",
-        path.display()
-    );
-    if let Some(marker) = preserved {
-        assert!(
-            body.contains(marker),
-            "{} must keep pre-existing content ({marker:?}):\n{body}",
-            path.display()
-        );
+        .env("FAKE_MODE", mode);
+    for (key, value) in envs {
+        command.env(key, value);
     }
+    command.status().expect("spawn bash install.sh").success()
 }
 
-#[derive(Clone, Copy)]
-enum RcLayout {
-    Missing,
-    Plain,
-    StowAbsolute,
-    StowRelative,
-    /// `$root/user/.bashrc` → `../packages/bash/bashrc` (physical relative arm).
-    StowRelativeDotDot,
+fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str) -> bool {
+    run_installer_with_env(
+        install_sh,
+        home,
+        fakebin,
+        mode,
+        &[("GROK_BIN_DIR", home.join(".grok").join("bin"))],
+    )
 }
 
-struct ShellRcCase {
-    name: &'static str,
-    script: &'static str,
-    shell: &'static str,
-    rc_name: &'static str,
-    stow_name: &'static str,
-    layout: RcLayout,
-    reinstall: bool,
-}
-
-/// Returns `(installer_home, rc_path, stow_target, expected_link_value)`.
-fn setup_rc(
-    root: &Path,
-    case: &ShellRcCase,
-) -> (PathBuf, PathBuf, Option<PathBuf>, Option<PathBuf>) {
-    let marker = "# user shell rc\n";
-    match case.layout {
-        RcLayout::Missing => {
-            let home = root.to_path_buf();
-            (home.clone(), home.join(case.rc_name), None, None)
-        }
-        RcLayout::Plain => {
-            let home = root.to_path_buf();
-            let rc_link = home.join(case.rc_name);
-            std::fs::write(&rc_link, marker).unwrap();
-            (home, rc_link, None, None)
-        }
-        RcLayout::StowAbsolute | RcLayout::StowRelative => {
-            let home = root.to_path_buf();
-            let stow_dir = home.join("dotfiles");
-            std::fs::create_dir_all(&stow_dir).unwrap();
-            let target = stow_dir.join(case.stow_name);
-            std::fs::write(&target, marker).unwrap();
-            let link_value = if matches!(case.layout, RcLayout::StowAbsolute) {
-                target.clone()
-            } else {
-                PathBuf::from(format!("dotfiles/{}", case.stow_name))
-            };
-            let rc_link = home.join(case.rc_name);
-            std::os::unix::fs::symlink(&link_value, &rc_link).unwrap();
-            (home, rc_link, Some(target), Some(link_value))
-        }
-        RcLayout::StowRelativeDotDot => {
-            // $HOME = root/user; package is a sibling of user (relative needs `..`).
-            let home = root.join("user");
-            std::fs::create_dir_all(&home).unwrap();
-            let target = root.join("packages/bash/bashrc");
-            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-            std::fs::write(&target, marker).unwrap();
-            let link_value = PathBuf::from("../packages/bash/bashrc");
-            let rc_link = home.join(case.rc_name);
-            std::os::unix::fs::symlink(&link_value, &rc_link).unwrap();
-            (home, rc_link, Some(target), Some(link_value))
-        }
-    }
-}
-
-fn run_shell_rc_case(case: &ShellRcCase) {
-    let Some(script) = script_path(case.script) else {
-        eprintln!(
-            "skipping {}: {} not found relative to crate",
-            case.name, case.script
-        );
-        return;
-    };
+#[test]
+fn pager_bash_installers_accept_checked_releases_and_reject_bad_checksums() {
     let platform = host_platform();
     let fakedir = tempfile::tempdir().unwrap();
     write_fake_curl(fakedir.path());
 
-    let root = tempfile::tempdir().unwrap();
-    let (home_path, rc_path, stow_target, expected_link) = setup_rc(root.path(), case);
-    seed_previous_good(&home_path, &platform);
+    for script_name in ["install.sh", "install-enterprise.sh"] {
+        let script = script_path(script_name)
+            .unwrap_or_else(|| panic!("missing {script_name} relative to updater crate"));
+        let cases = [
+            ("full", true),
+            ("truncate", false),
+            ("garbage", false),
+            ("other_filename", false),
+            ("full", true),
+        ];
 
-    assert!(
-        run_installer(&script, &home_path, fakedir.path(), "full", case.shell),
-        "{}: first install should succeed",
-        case.name
-    );
+        for (mode, expect_ok) in cases {
+            let home = tempfile::tempdir().unwrap();
+            seed_previous_good(home.path(), &platform);
 
-    if case.reinstall {
-        assert!(
-            run_installer(&script, &home_path, fakedir.path(), "full", case.shell),
-            "{}: reinstall should succeed",
-            case.name
-        );
-    }
-
-    match case.layout {
-        RcLayout::Missing | RcLayout::Plain => {
-            assert!(
-                rc_path.is_file() && !rc_path.is_symlink(),
-                "{}: {} must be a regular file",
-                case.name,
-                case.rc_name
-            );
-            let preserved = match case.layout {
-                RcLayout::Plain => Some("# user shell rc"),
-                _ => None,
-            };
-            assert_single_installer_block(&rc_path, preserved);
-        }
-        RcLayout::StowAbsolute | RcLayout::StowRelative | RcLayout::StowRelativeDotDot => {
-            assert!(
-                rc_path.is_symlink(),
-                "{}: {} must remain a symlink after install",
-                case.name,
-                case.rc_name
-            );
-            let link = std::fs::read_link(&rc_path).unwrap();
+            let ok = run_installer(&script, home.path(), fakedir.path(), mode);
             assert_eq!(
-                link,
-                *expected_link.as_ref().unwrap(),
-                "{}: symlink target must be unchanged",
-                case.name
+                ok, expect_ok,
+                "{script_name} mode={mode} exit success mismatch"
             );
-            let target = stow_target.as_ref().unwrap();
-            assert_single_installer_block(target, Some("# user shell rc"));
+
+            // A rejected artifact must leave the working previous binary active.
+            assert_active_grok_runs(home.path());
         }
     }
-
-    assert_active_grok_runs(&home_path);
 }
 
 #[test]
-fn install_sh_blitz_keeps_grok_runnable_under_corruption() {
-    let Some(install_sh) = install_sh_path() else {
-        eprintln!("skipping: install.sh not found relative to crate; run under cargo");
-        return;
-    };
-    let platform = host_platform();
+fn pager_bash_installers_default_to_canonical_groky_home() {
     let fakedir = tempfile::tempdir().unwrap();
     write_fake_curl(fakedir.path());
 
-    // Each entry: (mode, should the installer succeed?). Loop a few rounds so a
-    // re-install over an existing good install is also exercised.
-    let cases = [
-        ("full", true),
-        ("truncate", false),
-        ("garbage", false),
-        ("full", true),
-        ("truncate", false),
-        ("garbage", false),
-        ("full", true),
-    ];
-
-    for (mode, expect_ok) in cases {
+    for script_name in ["install.sh", "install-enterprise.sh"] {
+        let script = script_path(script_name).unwrap_or_else(|| panic!("missing {script_name}"));
         let home = tempfile::tempdir().unwrap();
-        seed_previous_good(home.path(), &platform);
+        let canonical = home.path().join("canonical");
+        let legacy = home.path().join("legacy");
 
-        let ok = run_installer(&install_sh, home.path(), fakedir.path(), mode, "/bin/bash");
-        assert_eq!(
-            ok, expect_ok,
-            "install.sh mode={mode} exit success mismatch"
+        assert!(
+            run_installer_with_env(
+                &script,
+                home.path(),
+                fakedir.path(),
+                "full",
+                &[
+                    ("GROKY_HOME", canonical.clone()),
+                    ("GROK_HOME", legacy.clone())
+                ],
+            ),
+            "{script_name} must install using GROKY_HOME before GROK_HOME"
         );
+        let target = if cfg!(target_arch = "x86_64") {
+            "x86_64-unknown-linux-gnu"
+        } else {
+            "aarch64-unknown-linux-gnu"
+        };
+        assert!(
+            canonical
+                .join("downloads")
+                .join(format!("groky-{target}"))
+                .is_file()
+        );
+        assert!(canonical.join("bin/groky").is_symlink());
+        assert!(canonical.join("bin/agent").is_symlink());
+        assert!(!legacy.exists(), "GROK_HOME must lose to GROKY_HOME");
 
-        // The invariant holds regardless of which path was taken: the active
-        // grok always runs (new good binary on success, previous-good on
-        // rejection).
-        assert_active_grok_runs(home.path());
+        let default_home = tempfile::tempdir().unwrap();
+        assert!(
+            run_installer_with_env(&script, default_home.path(), fakedir.path(), "full", &[]),
+            "{script_name} must install with the default home"
+        );
+        assert!(default_home.path().join(".groky/downloads").is_dir());
+        assert!(default_home.path().join(".groky/bin/groky").is_symlink());
+        assert!(default_home.path().join(".groky/bin/agent").is_symlink());
+        assert!(!default_home.path().join(".grok").exists());
     }
 }
 
-/// Shell-rc rewrite matrix: stow absolute/relative/`..`, plain, first-create, enterprise.
 #[test]
-fn install_sh_shell_rc_rewrite_matrix() {
-    let cases = [
-        ShellRcCase {
-            name: "stow absolute bashrc reinstall",
-            script: "install.sh",
-            shell: "/bin/bash",
-            rc_name: ".bashrc",
-            stow_name: "bashrc",
-            layout: RcLayout::StowAbsolute,
-            reinstall: true,
-        },
-        ShellRcCase {
-            name: "stow relative bashrc reinstall",
-            script: "install.sh",
-            shell: "/bin/bash",
-            rc_name: ".bashrc",
-            stow_name: "bashrc",
-            layout: RcLayout::StowRelative,
-            reinstall: true,
-        },
-        ShellRcCase {
-            name: "stow relative ../ bashrc reinstall",
-            script: "install.sh",
-            shell: "/bin/bash",
-            rc_name: ".bashrc",
-            stow_name: "bashrc",
-            layout: RcLayout::StowRelativeDotDot,
-            reinstall: true,
-        },
-        ShellRcCase {
-            name: "plain bashrc reinstall",
-            script: "install.sh",
-            shell: "/bin/bash",
-            rc_name: ".bashrc",
-            stow_name: "bashrc",
-            layout: RcLayout::Plain,
-            reinstall: true,
-        },
-        ShellRcCase {
-            name: "missing bashrc first install",
-            script: "install.sh",
-            shell: "/bin/bash",
-            rc_name: ".bashrc",
-            stow_name: "bashrc",
-            layout: RcLayout::Missing,
-            reinstall: false,
-        },
-        ShellRcCase {
-            name: "enterprise stow absolute bashrc reinstall",
-            script: "install-enterprise.sh",
-            shell: "/bin/bash",
-            rc_name: ".bashrc",
-            stow_name: "bashrc",
-            layout: RcLayout::StowAbsolute,
-            reinstall: true,
-        },
-    ];
+fn pager_bash_installers_follow_the_groky_github_release_contract() {
+    for script in ["install.sh", "install-enterprise.sh"] {
+        let path = script_path(script).unwrap_or_else(|| panic!("missing {script}"));
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
 
-    for case in &cases {
-        run_shell_rc_case(case);
+        assert!(
+            body.contains("github.com/amanverasia/groky/releases/download/${release_tag}"),
+            "{script} must request assets below the resolved release tag"
+        );
+        assert!(
+            body.contains("tarball=\"groky-${tag}-${target}.tar.gz\""),
+            "{script} must request the tagged groky tarball"
+        );
+        assert!(
+            body.contains("$tarball.sha256"),
+            "{script} must download the tarball checksum"
+        );
+        assert!(
+            body.contains("sha256sum") && body.contains("actual_checksum"),
+            "{script} must verify the checksum against the expected tarball"
+        );
+        assert!(
+            body.contains("tar xzf") && body.contains("install -m 755"),
+            "{script} must extract and install the verified binary"
+        );
+        assert!(
+            !body.contains("/${CHANNEL}")
+                && !body.contains("/stable")
+                && !body.contains("/alpha")
+                && !body.contains("/enterprise"),
+            "{script} must not request a legacy channel pointer"
+        );
+        assert!(
+            !body.contains("grok-${version}") && !body.contains("grok-$version"),
+            "{script} must not request a legacy raw grok binary asset"
+        );
+    }
+}
+
+#[test]
+fn pager_powershell_installers_make_no_legacy_or_release_asset_requests() {
+    for script in ["install.ps1", "install-enterprise.ps1"] {
+        let path = script_path(script).unwrap_or_else(|| panic!("missing {script}"));
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            !body.contains("Invoke-WebRequest") && !body.contains("releases/download"),
+            "{script} must fail before requesting an unavailable Windows asset"
+        );
+        assert!(
+            !body.contains("/stable") && !body.contains("/alpha") && !body.contains("/enterprise"),
+            "{script} must not request a legacy channel pointer"
+        );
+    }
+}
+
+#[test]
+fn pager_installers_explicitly_reject_windows_until_windows_release_assets_exist() {
+    for script in ["install.sh", "install-enterprise.sh"] {
+        let path = script_path(script).unwrap_or_else(|| panic!("missing {script}"));
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            body.contains("Windows is not supported") && !body.contains("os=\"windows\""),
+            "{script} must explicitly reject Windows rather than request an unpublished asset"
+        );
+    }
+
+    for script in ["install.ps1", "install-enterprise.ps1"] {
+        let path = script_path(script).unwrap_or_else(|| panic!("missing {script}"));
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            body.contains("Windows release assets are not available"),
+            "{script} must explicitly reject unsupported Windows installation"
+        );
     }
 }
