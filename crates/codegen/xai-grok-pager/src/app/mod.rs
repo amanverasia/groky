@@ -423,7 +423,7 @@ fn resolve_hunk_tracker_mode(
 /// its history). Sessions not found locally are restored from remote storage.
 ///
 /// Returns `Ok(true)` when the user accepted a pending update. The caller
-/// should print a message telling the user to relaunch `grok`.
+/// should print a message telling the user to relaunch `groky`.
 pub async fn run(
     args: PagerArgs,
     bg_update_rx: Option<
@@ -745,9 +745,9 @@ fn print_exit_resume_hint(session_id: &str, minimal: bool, w: &mut impl Write) {
     let _ = writeln!(w);
     let _ = writeln!(w, "Resume this session with:");
     if minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {session_id}");
+        let _ = writeln!(w, "  groky --minimal --resume {session_id}");
     } else {
-        let _ = writeln!(w, "  grok --resume {session_id}");
+        let _ = writeln!(w, "  groky --resume {session_id}");
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1304,10 +1304,10 @@ pub(crate) fn set_terminal_title(title: &str) {
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
-        "grok".into()
+        "groky".into()
     } else {
-        let truncated: String = sanitized.chars().take(80 - 6).collect();
-        format!("{} - grok", truncated)
+        let truncated: String = sanitized.chars().take(80 - 7).collect();
+        format!("{} - groky", truncated)
     }
 }
 fn set_panic_hook(mode: ScreenMode) {
@@ -1350,11 +1350,11 @@ mod tests {
     fn terminal_title_strips_control_characters() {
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
-            "evil]52;c;payloadtitle - grok"
+            "evil]52;c;payloadtitle - groky"
         );
-        assert_eq!(terminal_title_string("\x07\x1b\x00"), "grok");
-        assert_eq!(terminal_title_string(""), "grok");
-        assert_eq!(terminal_title_string("My chat"), "My chat - grok");
+        assert_eq!(terminal_title_string("\x07\x1b\x00"), "groky");
+        assert_eq!(terminal_title_string(""), "groky");
+        assert_eq!(terminal_title_string("My chat"), "My chat - groky");
     }
     #[test]
     fn hunk_tracker_mode_nothing_set_is_none() {
@@ -1722,9 +1722,9 @@ mod tests {
         assert!(!args.no_alt_screen);
     }
     #[test]
-    fn cli_command_name_is_grok() {
+    fn cli_command_name_is_groky() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        assert_eq!(PagerArgs::command().get_name(), "groky");
     }
     #[test]
     fn cli_help_output_header() {
@@ -1736,7 +1736,7 @@ mod tests {
             vec![
                 "Grok Build TUI",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: groky [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]
@@ -1774,7 +1774,7 @@ mod tests {
         print_exit_resume_hint("sess-abc", false, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --resume sess-abc\n"
+            "\nResume this session with:\n  groky --resume sess-abc\n"
         );
     }
     #[test]
@@ -1783,7 +1783,7 @@ mod tests {
         print_exit_resume_hint("sess-abc", true, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --minimal --resume sess-abc\n"
+            "\nResume this session with:\n  groky --minimal --resume sess-abc\n"
         );
     }
     #[test]

@@ -99,7 +99,7 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
     );
     eprintln!();
 }
-/// Entrypoint tag for `grok -p`; keys the quiet stderr default in `init_tracing_simple`.
+/// Entrypoint tag for `groky -p`; keys the quiet stderr default in `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";
 /// Initialize simple tracing for non-TUI agent modes.
 fn init_tracing_simple(app_entrypoint: &'static str) {
@@ -129,14 +129,14 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
         .with(xai_grok_telemetry::hooks_log::layer());
     xai_grok_telemetry::debug_log::install_firehose(registry, app_entrypoint);
 }
-/// `grok setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
+/// `groky setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
 async fn run_setup_command(json: bool) {
     use xai_grok_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
         eprintln!("No deployment key or team sign-in found.");
         eprintln!();
-        eprintln!("To install managed configuration, sign in with a team using `grok login`,");
+        eprintln!("To install managed configuration, sign in with a team using `groky login`,");
         eprintln!("or set a deployment key:");
         eprintln!();
         if cfg!(unix) {
@@ -144,9 +144,9 @@ async fn run_setup_command(json: bool) {
         } else {
             eprintln!("  $env:GROK_DEPLOYMENT_KEY=\"<your-key>\"");
         }
-        eprintln!("  grok setup");
+        eprintln!("  groky setup");
         eprintln!();
-        eprintln!("Or add the key to ~/.grok/config.toml:");
+        eprintln!("Or add the key to ~/.groky/config.toml:");
         eprintln!();
         eprintln!("  [endpoints]");
         eprintln!("  deployment_key = \"<your-key>\"");
@@ -184,7 +184,7 @@ async fn run_setup_command(json: bool) {
         }
         SetupOutcome::Skipped => {
             eprintln!(
-                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `grok setup` again."
+                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `groky setup` again."
             );
         }
         SetupOutcome::Failed(e) => {
@@ -253,7 +253,7 @@ async fn kill_leaders() -> Result<()> {
         };
         if !xai_grok_shell::util::is_grok_process(pid) {
             if let Some(ref lock) = d.lock_path {
-                eprintln!("  PID {pid} is not a grok process, removing stale lock");
+                eprintln!("  PID {pid} is not a groky process, removing stale lock");
                 let _ = std::fs::remove_file(lock);
                 cleaned += 1;
             }
@@ -345,10 +345,10 @@ fn ensure_control_caps(reg: &LeaderRegistration) -> Result<&LeaderCapabilities> 
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Leader does not advertise capabilities (legacy version)"))
 }
-/// Env override for the `grok workspace` gate: any truthy value enables the
+/// Env override for the `groky workspace` gate: any truthy value enables the
 /// command locally, a falsy one disables it — bypassing the remote settings flag.
 const WORKSPACE_COMMAND_ENV: &str = "GROK_WORKSPACE_COMMAND";
-/// Resolution of the `grok workspace` gate. `Unknown` is kept separate from
+/// Resolution of the `groky workspace` gate. `Unknown` is kept separate from
 /// `Disabled` so we don't tell the user the flag is off when the settings were
 /// simply never read (both fail closed, but `Unknown` earns an honest message).
 #[derive(Debug, PartialEq, Eq)]
@@ -406,14 +406,14 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         WorkspaceGate::Enabled => {}
         WorkspaceGate::Disabled => {
             anyhow::bail!(
-                "`grok workspace` is not enabled for this account \
+                "`groky workspace` is not enabled for this account \
              (gated by a server-side feature flag that is currently off)."
             )
         }
         WorkspaceGate::Unknown => {
             anyhow::bail!(
-                "Could not load your settings for `grok workspace`. Check your \
-             network connection (run `grok login` if you are signed out), then \
+                "Could not load your settings for `groky workspace`. Check your \
+             network connection (run `groky login` if you are signed out), then \
              try again."
             )
         }
@@ -469,7 +469,7 @@ async fn connect_workspace_control(
     .map_err(|e| {
         anyhow::anyhow!(
             "no running leader for this environment ({e}). \
-             Start a grok session, or run `grok workspace start`."
+             Start a groky session, or run `groky workspace start`."
         )
     })
 }
@@ -509,14 +509,14 @@ async fn workspace_start(
     );
     if !use_leader {
         anyhow::bail!(
-            "`grok workspace` requires leader mode (the workspace is shared via the leader).\n\
-             Enable it with `[cli] use_leader = true` in ~/.grok/config.toml, or pass --leader."
+            "`groky workspace` requires leader mode (the workspace is shared via the leader).\n\
+             Enable it with `[cli] use_leader = true` in ~/.groky/config.toml, or pass --leader."
         );
     }
     ensure_authenticated(
         &agent_config.grok_com_config,
         false,
-        Some("No cached credentials found. Run `grok login` first."),
+        Some("No cached credentials found. Run `groky login` first."),
     )
     .await?;
     let env_urls = LeaderEnvUrls::from(&agent_config.grok_com_config);
@@ -932,7 +932,7 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
 }
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
-const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
+const PLUGIN_DIR_LEADER_WARNING: &str = "groky agent: --plugin-dir is ignored in leader mode; run with --no-leader to \
      load per-process plugins";
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
 async fn run_agent_command(
@@ -1017,7 +1017,7 @@ async fn run_agent_command(
         None,
     );
     if let Some(warning) = launch_yolo.blocked_warning {
-        eprintln!("grok: {warning}");
+        eprintln!("groky: {warning}");
     }
     agent_config.default_yolo_mode = launch_yolo.yolo;
     agent_config.default_auto_mode = xai_grok_shell::util::config::effective_auto_for_launch(
@@ -1407,12 +1407,12 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 /// Single audit point for the `Command::Dashboard` soft-subcommand.
 /// Sets `GROK_OPEN_DASHBOARD_AT_STARTUP=1` if the user asked for
-/// `grok dashboard`, and clears `args.command` so the regular
+/// `groky dashboard`, and clears `args.command` so the regular
 /// subcommand match doesn't try to handle it.
 ///
 /// The dashboard is independent of leader mode — it renders local
 /// sessions and, when a leader happens to be present, additionally shows
-/// the leader roster — so `grok dashboard` does NOT force leader mode and
+/// the leader roster — so `groky dashboard` does NOT force leader mode and
 /// is compatible with `--no-leader`.
 ///
 /// The only gate is the feature flag: a disabled dashboard
@@ -1426,7 +1426,7 @@ fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
     if !xai_grok_pager::views::dashboard::dashboard_enabled() {
         anyhow::bail!(
             "the Agent Dashboard is disabled. Enable it by removing \
-             `[dashboard] enabled = false` from ~/.grok/config.toml and \
+             `[dashboard] enabled = false` from ~/.groky/config.toml and \
              unsetting GROK_AGENT_DASHBOARD=0."
         );
     }
@@ -1890,7 +1890,7 @@ async fn async_main() -> Result<()> {
             None,
         );
         if let Some(warning) = launch_yolo.blocked_warning {
-            eprintln!("grok: {warning}");
+            eprintln!("groky: {warning}");
         }
         let json_schema = args
             .json_schema
@@ -1972,9 +1972,9 @@ async fn async_main() -> Result<()> {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
             if finish_update_on_exit(adopted, &update_config).await {
-                eprintln!("Update installed. Run `grok` to start.");
+                eprintln!("Update installed. Run `groky` to start.");
             } else {
-                eprintln!("Update did not complete. Run `grok update` to retry.");
+                eprintln!("Update did not complete. Run `groky update` to retry.");
             }
             Ok(())
         }
@@ -1985,11 +1985,11 @@ async fn async_main() -> Result<()> {
 /// Complete the update after a quit-for-update (Ctrl+U) exit. Returns `true`
 /// when an update path completed without a reported failure.
 ///
-/// Prefers awaiting the parked waiter for the background `grok update` child
+/// Prefers awaiting the parked waiter for the background `groky update` child
 /// spawned at startup — the download is usually already done or in flight.
 /// Only when there is no waiter (spawn failed, or no download was needed
 /// because the target was already on disk) or the child failed does this
-/// fall back to a fresh blocking `grok update`, which itself resolves to
+/// fall back to a fresh blocking `groky update`, which itself resolves to
 /// "Already up to date" without downloading when the disk is current.
 async fn finish_update_on_exit(
     adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
@@ -2077,7 +2077,7 @@ fn stdio_auto_update_enabled(
 ) -> bool {
     is_stdio && !use_leader && updates_enabled && managed_install
 }
-/// True when `exe` is the binary `<grok_home>/bin/grok` resolves to, the
+/// True when `exe` is the binary `<grok_home>/bin/groky` resolves to, the
 /// install that adopts a staged update on respawn. Both sides are
 /// canonicalized; any failure reports unmanaged and skips the update. The
 /// npm shim hardcodes `~/.grok`, so a custom `GROK_HOME` skips here too.
@@ -2149,7 +2149,7 @@ async fn run_update_command(
     }
     Ok(())
 }
-/// After a successful `grok update`, ask any running leader on this machine that
+/// After a successful `groky update`, ask any running leader on this machine that
 /// is older than `installed_version` to relaunch onto the new binary (bounded
 /// grace; running sessions close and reconnect via `session/load`).
 ///
@@ -2367,32 +2367,42 @@ mod tests {
         xai_grok_shell::heap_profile::dump_to_path(dump.path()).expect("shell dump");
         dump.assert_nonempty_dump();
     }
+    #[test]
+    fn leader_plugin_dir_remediation_names_the_groky_agent_command() {
+        assert!(
+            PLUGIN_DIR_LEADER_WARNING.starts_with("groky agent:"),
+            "leader-mode remediation must name the executable subcommand: {PLUGIN_DIR_LEADER_WARNING}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
-    fn is_managed_install_matches_only_the_bin_grok_target() {
-        let home =
-            std::env::temp_dir().join(format!("grok-pager-managed-install-{}", std::process::id()));
+    fn is_managed_install_matches_only_the_bin_groky_target() {
+        let home = std::env::temp_dir().join(format!(
+            "groky-pager-managed-install-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join("bin")).unwrap();
         std::fs::create_dir_all(home.join("downloads")).unwrap();
         assert!(!is_managed_install(
-            Some(home.join("bin").join("grok")),
+            Some(home.join("bin").join("groky")),
             &home
         ));
         assert!(!is_managed_install(None, &home));
         assert!(!is_managed_install(
-            Some(home.join("bin").join("grok")),
+            Some(home.join("bin").join("groky")),
             std::path::Path::new("")
         ));
-        let target = home.join("downloads").join("grok-1.2.3");
+        let target = home.join("downloads").join("groky-1.2.3");
         std::fs::write(&target, b"binary").unwrap();
-        std::os::unix::fs::symlink(&target, home.join("bin").join("grok")).unwrap();
+        std::os::unix::fs::symlink(&target, home.join("bin").join("groky")).unwrap();
         assert!(is_managed_install(
-            Some(home.join("bin").join("grok")),
+            Some(home.join("bin").join("groky")),
             &home
         ));
         assert!(is_managed_install(Some(target.clone()), &home));
-        let pinned = home.join("bin").join("grok-9.9.9");
+        let pinned = home.join("bin").join("groky-9.9.9");
         std::fs::write(&pinned, b"binary").unwrap();
         assert!(!is_managed_install(Some(pinned), &home));
         let _ = std::fs::remove_dir_all(&home);
@@ -2419,7 +2429,7 @@ mod tests {
         );
     }
     use clap::Parser as _;
-    /// `grok dashboard` flags the startup hook without forcing leader mode —
+    /// `groky dashboard` flags the startup hook without forcing leader mode —
     /// the dashboard is independent of leader mode, so the launch keeps
     /// whatever leader setting the user (or config) chose.
     #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -2440,7 +2450,7 @@ mod tests {
         );
         unsafe { std::env::remove_var("GROK_OPEN_DASHBOARD_AT_STARTUP") };
     }
-    /// `grok dashboard --no-leader` is allowed — the dashboard does not
+    /// `groky dashboard --no-leader` is allowed — the dashboard does not
     /// require a leader, so the combination launches into the dashboard in
     /// non-leader mode.
     #[serial_test::serial(GROK_AGENT_DASHBOARD)]

@@ -857,12 +857,8 @@ mod tests {
 
         handle_notification(&config, notification, &mut offsets).await;
 
-        // Auto-wake sends CopyFile first, then Prompt (not InjectNotification).
-        let cmd1 = cmd_rx.try_recv().expect("expected CopyFile");
-        assert!(matches!(cmd1, SessionCommand::CopyFile { .. }));
-
-        let cmd2 = cmd_rx.try_recv().expect("expected Prompt");
-        match cmd2 {
+        let cmd1 = cmd_rx.try_recv().expect("expected Prompt");
+        match cmd1 {
             SessionCommand::Prompt {
                 prompt_id,
                 prompt_blocks,
@@ -883,10 +879,10 @@ mod tests {
             _ => panic!("expected Prompt"),
         }
 
-        let cmd3 = cmd_rx
+        let cmd2 = cmd_rx
             .try_recv()
             .expect("expected DispatchNotificationHook for task_complete");
-        match cmd3 {
+        match cmd2 {
             SessionCommand::DispatchNotificationHook {
                 notification_type,
                 message,
@@ -984,11 +980,7 @@ mod tests {
         )
         .await;
 
-        // Auto-wake sends CopyFile, then the synthetic Prompt.
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(SessionCommand::CopyFile { .. })
-        ));
+        // Auto-wake sends the synthetic Prompt.
         assert!(matches!(
             cmd_rx.try_recv(),
             Ok(SessionCommand::Prompt { .. })
@@ -1162,10 +1154,6 @@ mod tests {
             }
             _ => panic!("expected DropMonitorNotifications before auto-wake Prompt"),
         }
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(SessionCommand::CopyFile { .. })
-        ));
         let cmd = cmd_rx.try_recv().expect("expected Prompt auto-wake");
         match cmd {
             SessionCommand::Prompt {
@@ -1775,8 +1763,6 @@ mod tests {
 
         handle_notification(&config, notification, &mut offsets).await;
 
-        // Skip CopyFile
-        let _ = cmd_rx.try_recv().unwrap();
         let cmd = cmd_rx.try_recv().unwrap();
         if let SessionCommand::Prompt { prompt_id, .. } = cmd {
             assert_eq!(prompt_id, "task-completed-unique-id-789");
@@ -2003,7 +1989,6 @@ mod tests {
 
     /// Extract the auto-wake prompt text emitted on the session command channel.
     fn auto_wake_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
-        let _ = cmd_rx.try_recv().expect("expected CopyFile");
         let cmd = cmd_rx.try_recv().expect("expected Prompt");
         match cmd {
             SessionCommand::Prompt { prompt_blocks, .. } => match &prompt_blocks[0] {

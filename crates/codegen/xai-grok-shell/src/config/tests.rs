@@ -2259,7 +2259,7 @@ fn bundled_personas_and_roles_have_lowest_priority_in_resolve_order() {
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let workspace = tmp.path().join("workspace");
-    let bundled = home.join(".grok").join("bundled");
+    let bundled = home.join(".groky").join("bundled");
     std::fs::create_dir_all(workspace.join(".grok").join("roles")).unwrap();
     std::fs::create_dir_all(workspace.join(".grok").join("personas")).unwrap();
     std::fs::create_dir_all(home.join(".grok").join("roles")).unwrap();

@@ -195,14 +195,14 @@ pub fn user_grok_home() -> Option<PathBuf> {
     resolvable.then(grok_home)
 }
 
-/// Canonical grok application path: `$GROK_HOME/bin/grok` (Unix) or `grok.exe` (Windows).
+/// Canonical groky application path: `$GROK_HOME/bin/groky` (Unix) or `groky.exe` (Windows).
 pub fn grok_application() -> PathBuf {
     grok_application_in(&grok_home())
 }
 
 /// [`grok_application`] under an explicit home instead of `$GROK_HOME`.
 pub fn grok_application_in(home: &std::path::Path) -> PathBuf {
-    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
+    let name = if cfg!(windows) { "groky.exe" } else { "groky" };
     home.join("bin").join(name)
 }
 

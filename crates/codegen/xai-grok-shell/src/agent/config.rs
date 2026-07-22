@@ -8831,6 +8831,7 @@ agent_type = "cursor"
             auto_update = false
             [features]
             feedback = true
+            telemetry = true
             [endpoints]
             deployment_key = "test"
             management_api_key = "mgmt-key"
@@ -8843,9 +8844,6 @@ agent_type = "cursor"
             approval_mode = "ask"
             [session]
             auto_compact_threshold_percent = 85
-            [telemetry]
-            enabled = true
-            trace_upload = true
             [agent]
             name = "custom"
             [skills]
@@ -9588,14 +9586,14 @@ telemetry = "session_metrics"
 "#,
         )
         .unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&session), Some(true));
+        assert_eq!(telemetry_enabled_from_toml(&session), Some(false));
         let unknown: toml::Value = toml::from_str(
             r#"[features]
 telemetry = "garbage"
 "#,
         )
         .unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&unknown), None);
+        assert_eq!(telemetry_enabled_from_toml(&unknown), Some(false));
     }
     #[test]
     #[serial]
@@ -9604,7 +9602,7 @@ telemetry = "garbage"
         unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
         assert!(is_telemetry_explicitly_disabled_sync());
         unsafe { std::env::set_var("GROK_TELEMETRY_ENABLED", "1") };
-        assert!(!is_telemetry_explicitly_disabled_sync());
+        assert!(is_telemetry_explicitly_disabled_sync());
         unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
         unsafe { std::env::set_var("DISABLE_TELEMETRY", "1") };
         assert!(is_telemetry_explicitly_disabled_sync());

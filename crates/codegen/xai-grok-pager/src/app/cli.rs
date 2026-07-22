@@ -55,7 +55,7 @@ pub enum Command {
     /// Fetch and install managed configuration
     Setup {
         /// Print the fetched configuration as JSON instead of installing it;
-        /// writes nothing to ~/.grok.
+        /// writes nothing to ~/.groky.
         #[arg(long)]
         json: bool,
     },
@@ -76,10 +76,10 @@ clipboard (containers, SSH) and your terminal does not handle OSC 52 itself
 sync with your window size.
 
 Examples:
-  grok wrap docker exec -it my-container bash
-  grok wrap kubectl exec -it my-pod -- bash
+  groky wrap docker exec -it my-container bash
+  groky wrap kubectl exec -it my-pod -- bash
 
-See ~/.grok/README.md for more information.
+See ~/.groky/README.md for more information.
 ")]
     Wrap(WrapArgs),
     /// Export a session transcript as Markdown
@@ -135,7 +135,7 @@ See ~/.grok/README.md for more information.
     ///
     /// Centralised, agent-native overview of every session (top-level and
     /// subagents). Disabled when `[dashboard].enabled = false` in
-    /// `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env
+    /// `~/.groky/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env
     /// var is set.
     Dashboard,
 }
@@ -153,10 +153,10 @@ pub struct WrapArgs {
     )]
     pub command: Vec<String>,
 }
-/// Targets a running leader process by PID (used by `grok leader` / `grok workspace`).
+/// Targets a running leader process by PID (used by `groky leader` / `groky workspace`).
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct LeaderTargetArgs {
-    /// Leader process ID from `grok leader list`.
+    /// Leader process ID from `groky leader list`.
     #[arg(long)]
     pub pid: Option<u32>,
 }
@@ -311,13 +311,13 @@ impl AgentArgs {
                 Ok(canonical) if canonical.is_dir() => Some(canonical),
                 Ok(_) => {
                     eprintln!(
-                        "grok: --plugin-dir {}: not a directory; skipping",
+                        "groky: --plugin-dir {}: not a directory; skipping",
                         p.display()
                     );
                     None
                 }
                 Err(e) => {
-                    eprintln!("grok: --plugin-dir {}: {e}; skipping", p.display());
+                    eprintln!("groky: --plugin-dir {}: {e}; skipping", p.display());
                     None
                 }
             })
@@ -434,7 +434,7 @@ pub struct PagerArgs {
     /// Working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
-    /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
+    /// Use a custom leader socket path instead of the default `~/.groky/leader.sock`.
     #[arg(
         long = "leader-socket",
         value_name = "PATH",
@@ -646,7 +646,7 @@ pub struct PagerArgs {
     pub self_verify: bool,
     /// Exit as soon as the first agent turn ends, without waiting for pending
     /// background bash/monitor tasks or background subagents (headless only).
-    /// Default for all `grok -p` runs is to wait (up to `--background-wait-timeout`)
+    /// Default for all `groky -p` runs is to wait (up to `--background-wait-timeout`)
     /// so eval harnesses see full task completion. Use this for fast scripts that
     /// only need the first turn's text. Does not wait for server-side auto-wake
     /// output or persistent monitors (those hit the timeout).
@@ -711,8 +711,8 @@ pub struct PagerArgs {
     /// Experimental: scrollback-native rendering. Finalized blocks are printed
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
-    /// Session-scoped only — does not write config. To default plain `grok` to
-    /// minimal, set `[ui] screen_mode = "minimal"` in ~/.grok/config.toml.
+    /// Session-scoped only — does not write config. To default plain `groky` to
+    /// minimal, set `[ui] screen_mode = "minimal"` in ~/.groky/config.toml.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// Open in the standard fullscreen TUI for this session, overriding a
@@ -721,7 +721,7 @@ pub struct PagerArgs {
     /// policy (--no-alt-screen, [terminal] alt_screen, terminal auto-detection).
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
     pub fullscreen: bool,
-    /// Write sampling events to ~/.grok/logs/sampling.jsonl.
+    /// Write sampling events to ~/.groky/logs/sampling.jsonl.
     #[arg(long = "log-sampling", env = "GROK_LOG_SAMPLING", hide = true)]
     pub log_sampling: bool,
     /// Show the login screen even when credentials are already available.
@@ -736,7 +736,7 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
-    /// Initial prompt for the interactive session, e.g. `grok "fix the bug"` or `grok --worktree=feat "create this feature"`.
+    /// Initial prompt for the interactive session, e.g. `groky "fix the bug"` or `groky --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",
         conflicts_with_all = &["single",
@@ -778,8 +778,8 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == "groky" || *n == "grok" || *n == "agent")
+            .unwrap_or("groky")
             .to_owned();
         let mut args = Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
         if let Some(socket) = args.leader_socket.take() {
@@ -892,7 +892,7 @@ impl PagerArgs {
     /// The initial interactive prompt from the positional argument, trimmed.
     ///
     /// Returns `None` when no positional prompt was given or it is only
-    /// whitespace. This is the `grok "<prompt>"` launch form; the headless
+    /// whitespace. This is the `groky "<prompt>"` launch form; the headless
     /// `-p`/`--single` path is handled separately.
     pub fn initial_prompt(&self) -> Option<&str> {
         self.prompt
@@ -904,6 +904,34 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_name_falls_back_to_groky_and_legacy_versions_exit_successfully() {
+        use clap::CommandFactory;
+
+        assert_eq!(PagerArgs::command().get_name(), "groky");
+        for legacy_name in ["grok", "agent"] {
+            let err = PagerArgs::try_parse_from([legacy_name, "--version"])
+                .expect_err("--version displays the version instead of returning arguments");
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert_eq!(
+                err.exit_code(),
+                0,
+                "{legacy_name} --version must exit successfully"
+            );
+        }
+    }
+
+    #[test]
+    fn help_uses_the_active_groky_home_and_command_name() {
+        use clap::CommandFactory;
+
+        let help = PagerArgs::command().render_long_help().to_string();
+        assert!(help.contains("Usage: groky "), "{help}");
+        assert!(help.contains("~/.groky/"), "{help}");
+        assert!(!help.contains("~/.grok/"), "{help}");
+        assert!(!help.contains("\n  grok "), "{help}");
+    }
+
     #[test]
     fn version_flag_exits_zero() {
         let err = PagerArgs::try_parse_from(["grok", "--version"]).unwrap_err();
