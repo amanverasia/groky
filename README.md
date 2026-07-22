@@ -28,14 +28,14 @@ groky keeps everything the upstream CLI does and adds:
 
 - **No networked telemetry.** Sentry, Mixpanel, OTLP export, and trace upload
   are removed entirely (~20k lines). Diagnostics stay local (log files under
-  `~/.grok/`), and a scan gate (`bin/check-no-network-telemetry.sh`) guards
+  `~/.groky/`), and a scan gate (`bin/check-no-network-telemetry.sh`) guards
   against reintroduction.
 - **Multi-provider model catalog.** A bundled [models.dev](https://models.dev)
   snapshot ships 150+ providers and 4,500+ models (OpenAI, Anthropic,
-  OpenRouter, Groq, Mistral, Together, ...) with a 24-hour background refresh
-  and offline-safe caching.
+  OpenRouter, Groq, Mistral, Together, ...), with local caching and
+  provider-configured model discovery.
 - **`/providers` key management** (alias `/login`). Add API keys per provider
-  through a masked prompt; keys are stored in `~/.grok/auth.json` with `0600`
+  through a masked prompt; keys are stored in `~/.groky/auth.json` with `0600`
   permissions. A credential firewall guarantees xAI tokens never reach
   third-party providers.
 - **Provider-aware model picker.** `/model` (Ctrl+M) fuzzy-searches across
@@ -53,21 +53,43 @@ groky keeps everything the upstream CLI does and adds:
 See [`docs/configuration/providers.md`](docs/configuration/providers.md) for
 the full provider configuration guide.
 
+## Privacy and first run
+
+- **No phone-home by default.** Release builds do not send telemetry, check
+  xAI or groky update endpoints, download replacement binaries, or mutate
+  update settings at startup. Network traffic occurs only when you use a
+  configured provider or another explicitly networked feature.
+- **No forced browser login.** On a first run without credentials, groky opens
+  normally and shows a passive hint to set `XAI_API_KEY` or run `/providers`;
+  it does not block on a grok.com login screen.
+- **Updates are explicit.** Re-run the installer to update. `groky update`
+  preserves command compatibility but does not download or install updates.
+
 ## Installation
 
 ### One-line installer
 
-Installs the latest release to `~/.local/bin/groky` (Linux,
-x86_64 and aarch64; no sudo):
+Installs the latest Linux release to `~/.local/bin/groky` (no sudo):
+`x86_64`/`amd64` and `aarch64`/`arm64` are supported. The aarch64 release is
+built for a generic ARMv8-A baseline for compatibility with common ARM Linux
+hosts.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/amanverasia/groky/main/install.sh | bash
 ```
 
-Options via environment variables: `GROKY_VERSION=v0.1.0` pins a release,
-`GROKY_INSTALL_DIR` overrides the install directory. The script verifies the
-sha256 checksum of every download. Once groky.dev is live, the same installer
-will be served from `https://groky.dev/install.sh`.
+Options via environment variables: `GROKY_INSTALL_DIR` overrides the install
+directory. To pin a release tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/amanverasia/groky/main/install.sh | GROKY_VERSION='v<release-tag>' bash
+```
+
+The script verifies the sha256 checksum of every download. To update an
+existing installation, re-run the installer. groky intentionally does not
+perform background update checks or replace itself with an upstream `grok`
+binary. Once groky.dev is live, the same installer will be served from
+`https://groky.dev/install.sh`.
 
 Prebuilt binaries and checksums are also on the
 [releases page](https://github.com/amanverasia/groky/releases).
@@ -93,10 +115,20 @@ cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
 The binary artifact is named `groky` (upstream ships it as `grok`).
-Configuration lives under `~/.groky` (override with `GROKY_HOME`; legacy
-`GROK_HOME` and an existing `~/.grok` are honored — the latter is migrated
-automatically on first launch). Add your provider API keys with `/providers`
-on first launch, or sign in with an xAI account.
+Configuration lives under `~/.groky` (override with `GROKY_HOME`). On first
+launch without credentials, groky opens normally and shows a hint to set
+`XAI_API_KEY` or configure a provider with `/providers`.
+
+Interactive OIDC or external-provider login remains available when explicitly
+configured by the user or deployment.
+
+### Compatibility identifiers
+
+The public command, default config home, installer variables, and release
+artifact names use `groky`, `GROKY_*`, and `~/.groky`. Existing installations
+may continue to use selected legacy identifiers such as `GROK_HOME`,
+`GROK_CODE_XAI_API_KEY`, and `~/.grok`; default-path startup copies legacy data
+to `~/.groky` without deleting the original directory.
 
 ## Documentation
 
@@ -143,18 +175,22 @@ Things that do not exist yet:
 
 - [x] **Releases** — prebuilt binaries for Linux (x86_64 + aarch64),
   tag-driven via GitHub Actions; see [`docs/releasing.md`](docs/releasing.md)
-- [x] **One-line installer** — [`install.sh`](install.sh) with checksum
-  verification
+- [x] **One-line installer** — [`install.sh`](install.sh) verifies checksums;
+  re-run it to update explicitly
 - [x] **Binary/branding rename** — the binary ships as `groky`; config lives
   under `~/.groky` (with automatic migration from `~/.grok`)
+- [x] **Private, credential-less startup** — no networked telemetry, automatic
+  updater, or default login gate; first run opens normally without credentials
+- [x] **Privacy and portability guards** — CI prevents telemetry/updater
+  regressions and non-generic aarch64 CPU targeting
+- [x] **General CI breadth** — formatting, privacy/ARM guards, catalog and
+  binary checks, pager/updater/shell tests, and installer validation
 - [ ] **groky.dev website** — landing page and hosted documentation (will also
   serve `install.sh`)
 - [ ] **macOS release builds** — the GitHub macOS runners hung on the first
   attempt; matrix entries are disabled in `release.yml` pending diagnosis
   (building from source on macOS works)
 - [ ] **Windows builds** — currently best-effort/untested
-- [ ] **CI breadth** — build/test/lint pipeline beyond the provider-catalog
-  check, including the telemetry scan gate
 
 ## License
 
