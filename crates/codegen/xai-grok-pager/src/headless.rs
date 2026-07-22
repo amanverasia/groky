@@ -1,4 +1,4 @@
-//! Headless single-turn mode (`grok -p "prompt"`).
+//! Headless single-turn mode (`groky -p "prompt"`).
 //!
 //! Runs the agent in-process via
 //! `spawn_grok_shell`, sends the ACP lifecycle (init → auth → session → prompt),
@@ -507,14 +507,14 @@ fn auto_respond_to_permissions(
 /// "Not signed in" error message, tailored to the session type.
 fn auth_required_message(interactive: bool) -> String {
     if interactive {
-        "Not signed in. Run `grok login` to authenticate \
-         (or `grok login --device-code` if no browser is available)."
+        "Not signed in. Run `groky login` to authenticate \
+         (or `groky login --device-code` if no browser is available)."
             .to_string()
     } else {
         "Not signed in. To authenticate without a browser, run:\n  \
-         grok login --device-code\n\n\
+         groky login --device-code\n\n\
          Alternatively, set the XAI_API_KEY environment variable \
-         or run `grok login` on a machine with a browser."
+         or run `groky login` on a machine with a browser."
             .to_string()
     }
 }
@@ -800,7 +800,7 @@ async fn apply_headless_model_and_effort(
     .map_err(|e| {
         if let Some(name) = model_name {
             anyhow::anyhow!(
-                "Couldn't set model '{}': {}. Run 'grok models' to see available models.",
+                "Couldn't set model '{}': {}. Run 'groky models' to see available models.",
                 name,
                 e
             )
@@ -1803,6 +1803,15 @@ fn handle_ext_notification(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auth_remediation_uses_the_released_groky_command() {
+        for interactive in [false, true] {
+            let message = auth_required_message(interactive);
+            assert!(message.contains("groky login"), "{message}");
+            assert!(!message.contains("grok login"), "{message}");
+        }
+    }
+
     #[test]
     fn lifecycle_tracking_is_independent_of_wait_flag() {
         let mut pending = std::collections::HashSet::new();

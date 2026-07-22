@@ -295,8 +295,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                         PromptMode::Agent,
                         None,
                         None,
-                        None,
-                        None,
                         true,
                         None,
                         Some(ack_tx),
@@ -737,7 +735,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
             });
             let _ = actor
-                .process_conversation_turn_with_recovery("disabled-memory", None, None, None)
+                .process_conversation_turn_with_recovery("disabled-memory", None)
                 .await;
             let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
             persistence
@@ -1374,8 +1372,6 @@ async fn handle_prompt_injects_interrupt_reminder_before_user_message() {
                         PromptMode::Agent,
                         None,
                         None,
-                        None,
-                        None,
                         true,
                         None,
                         Some(ack_tx),
@@ -1435,8 +1431,6 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                         "scheduler-fired-test-1",
                         prompt_blocks,
                         PromptMode::Agent,
-                        None,
-                        None,
                         None,
                         None,
                         true,

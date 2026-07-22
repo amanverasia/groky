@@ -1,0 +1,200 @@
+# General pull-request validation for groky.
+#
+# Every pull request receives required validation — no source-only PR gap.
+# A broken main branch has no required-merge impact.
+#
+# Job layout:
+#   validate — always runs.  Fast static/analysis checks (< 5 min).
+#     cargo fmt, telemetry guard, target-cpu guard, catalog check, binary check.
+#   test     — always runs.  Core test suites (needs validate, < 15 min warm).
+#     pager lib, updater, shell lib.
+#   installer — path-filtered. Builds release binary and exercises install.sh.
+#
+# Action versions match the conventions in the existing release workflow
+# (checkout@v4, arduino/setup-protoc@v3, Swatinem/rust-cache@v2).
+name: general-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only access for all jobs; the installer job needs no secrets either.
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # validate — required, always runs, fast feedback
+  # ------------------------------------------------------------------
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # protoc is required by xai-proto-build in the pager-bin dependency tree.
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        # `rustup show` pulls the pinned toolchain on first use.
+        run: rustup show
+
+      - name: Install telemetry guard dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: No network telemetry guard
+        run: bin/check-no-network-telemetry.sh
+
+      - name: Portable target-cpu guard
+        # Non-generic target-cpu produces instructions that SIGILL on older
+        # CPUs; the runner may be too new to catch it.  See the design doc:
+        # docs/superpowers/specs/2026-07-17-portable-arm-no-login-no-phone-home-design.md
+        run: |
+          if grep -En 'target-cpu=' .cargo/config.toml | grep -v 'target-cpu=generic'; then
+            echo "non-generic target-cpu in .cargo/config.toml breaks portable builds" >&2
+            exit 1
+          fi
+
+      - name: Deterministic provider-catalog check
+        run: scripts/check-provider-catalog.sh
+
+      - name: Primary binary check
+        run: cargo check -p xai-grok-pager-bin
+
+  # ------------------------------------------------------------------
+  # test — required, always runs, core test suites
+  # ------------------------------------------------------------------
+  test:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Required by xai-proto-build (protoc PATH fallback).
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pager library tests
+        run: cargo test -p xai-grok-pager --lib
+
+      - name: Updater tests
+        run: cargo test -p xai-grok-update
+
+      - name: Shell library tests
+        run: cargo test -p xai-grok-shell --lib
+
+  # ------------------------------------------------------------------
+  # installer — path-filtered, exercises install.sh end-to-end
+  # ------------------------------------------------------------------
+  installer:
+    needs: validate
+    runs-on: ubuntu-latest
+    # Build the release binary and run test-install.sh only when installer-
+    # sensitive files changed, OR on non-PR events (push to main, manual).
+    # The step-level "Decide whether to run" gate (below) implements the
+    # path filter.  On push/workflow_dispatch we always build; on PR we
+    # consult `gh pr view --json files` to skip when nothing installer-
+    # sensitive was touched.
+    #
+    # validate + test always run regardless of path, satisfying the
+    # "no source-only PR gap" requirement.
+
+    ## HACK: GitHub Actions does not support job-level path filters.  The
+    ## workaround below uses `gh pr view --json files` to retrieve the list
+    ## of changed files and matches them with a simple pattern.  If `gh` is
+    ## not available (e.g., workflow_dispatch) we fall back to running.
+    #
+    # The critical files that should trigger installer validation:
+    #   install.sh
+    #   .github/workflows/release.yml
+    #   .cargo/config.toml
+    #   Cargo.toml (root)
+    #   scripts/test-install.sh
+    #   crates/codegen/xai-grok-pager-bin/Cargo.toml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether to run installer validation
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # On non-PR events (push to main, workflow_dispatch) always run.
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # PR event: check changed files against the installer-sensitive set.
+          changed=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --json files --jq '.files[].path' 2>/dev/null || true)
+          if [[ -z "$changed" ]]; then
+            # gh failed — run to be safe.
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          install_sensitive_pattern=(
+            '^install\.sh$'
+            '^\.github/workflows/release\.yml$'
+            '^\.cargo/config\.toml$'
+            '^Cargo\.toml$'
+            '^scripts/test-install\.sh$'
+            '^crates/codegen/xai-grok-pager-bin/Cargo\.toml$'
+          )
+          for p in "${install_sensitive_pattern[@]}"; do
+            if echo "$changed" | grep -qE "$p"; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "run=false" >> "$GITHUB_OUTPUT"
+
+      - name: Skip installer validation
+        if: steps.filter.outputs.run != 'true'
+        run: echo "No installer-sensitive files changed; skipping."
+
+      - name: Install Rust toolchain
+        if: steps.filter.outputs.run == 'true'
+        run: rustup show
+
+      - uses: arduino/setup-protoc@v3
+        if: steps.filter.outputs.run == 'true'
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.filter.outputs.run == 'true'
+
+      - name: Build release binary
+        if: steps.filter.outputs.run == 'true'
+        run: cargo build --release -p xai-grok-pager-bin
+
+      - name: Smoke test binary
+        if: steps.filter.outputs.run == 'true'
+        run: |
+          out=$(./target/release/groky --version)
+          echo "$out"
+          [[ "$out" == groky\ * ]]
+
+      - name: Run install.sh end-to-end tests
+        if: steps.filter.outputs.run == 'true'
+        run: scripts/test-install.sh

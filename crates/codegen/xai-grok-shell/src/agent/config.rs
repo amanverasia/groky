@@ -8831,6 +8831,7 @@ agent_type = "cursor"
             auto_update = false
             [features]
             feedback = true
+            telemetry = true
             [endpoints]
             deployment_key = "test"
             management_api_key = "mgmt-key"
@@ -8843,9 +8844,6 @@ agent_type = "cursor"
             approval_mode = "ask"
             [session]
             auto_compact_threshold_percent = 85
-            [telemetry]
-            enabled = true
-            trace_upload = true
             [agent]
             name = "custom"
             [skills]
@@ -9012,26 +9010,6 @@ agent_type = "cursor"
             vec!["ui.yollo".to_string()],
             "exactly the typo'd key must be flagged"
         );
-    }
-    /// Regression: a deployment key with no OAuth token must resolve to Proxy.
-    #[test]
-    fn resolve_upload_method_accepts_deployment_key_without_oauth() {
-        use crate::session::repo_changes::UploadMethod;
-        let endpoints = EndpointsConfig {
-            deployment_key: Some("enterprise-key".to_string()),
-            ..Default::default()
-        };
-        match endpoints.resolve_upload_method(None) {
-            Some(UploadMethod::Proxy {
-                deployment_key,
-                user_token,
-                ..
-            }) => {
-                assert_eq!(deployment_key.as_deref(), Some("enterprise-key"));
-                assert_eq!(user_token, "");
-            }
-            other => panic!("expected Proxy upload method, got {other:?}"),
-        }
     }
     fn empty_config() -> toml::Value {
         toml::Value::Table(toml::map::Map::new())
@@ -9608,14 +9586,14 @@ telemetry = "session_metrics"
 "#,
         )
         .unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&session), Some(true));
+        assert_eq!(telemetry_enabled_from_toml(&session), Some(false));
         let unknown: toml::Value = toml::from_str(
             r#"[features]
 telemetry = "garbage"
 "#,
         )
         .unwrap();
-        assert_eq!(telemetry_enabled_from_toml(&unknown), None);
+        assert_eq!(telemetry_enabled_from_toml(&unknown), Some(false));
     }
     #[test]
     #[serial]
@@ -9624,7 +9602,7 @@ telemetry = "garbage"
         unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
         assert!(is_telemetry_explicitly_disabled_sync());
         unsafe { std::env::set_var("GROK_TELEMETRY_ENABLED", "1") };
-        assert!(!is_telemetry_explicitly_disabled_sync());
+        assert!(is_telemetry_explicitly_disabled_sync());
         unsafe { std::env::remove_var("GROK_TELEMETRY_ENABLED") };
         unsafe { std::env::set_var("DISABLE_TELEMETRY", "1") };
         assert!(is_telemetry_explicitly_disabled_sync());

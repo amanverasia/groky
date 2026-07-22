@@ -83,8 +83,19 @@ set GROKY_VERSION (e.g. GROKY_VERSION=v0.1.0) and retry"
         die "download failed: $base/$tarball.sha256"
 
     # --- Verify checksum --------------------------------------------------------
-    # The .sha256 file references the bare tarball filename, so verify in tmpdir.
-    if ! (cd "$tmpdir" && $sha256_tool -c "$tarball.sha256" >/dev/null 2>&1); then
+    # The sidecar is untrusted: accept exactly one hash for this tarball, then
+    # compare it directly with the downloaded bytes rather than trusting -c.
+    local checksum_lines expected_checksum actual_checksum
+    mapfile -t checksum_lines < "$tmpdir/$tarball.sha256"
+    if [[ ${#checksum_lines[@]} -ne 1 ]] ||
+        [[ ! "${checksum_lines[0]}" =~ ^([[:xdigit:]]{64})[[:space:]]+\*?([^[:space:]]+)$ ]] ||
+        [[ "${BASH_REMATCH[2]}" != "$tarball" ]]; then
+        rm -f "$tmpdir/$tarball"
+        die "invalid checksum sidecar for $tarball; the download was discarded"
+    fi
+    expected_checksum="${BASH_REMATCH[1],,}"
+    actual_checksum=$($sha256_tool "$tmpdir/$tarball" | cut -d ' ' -f1)
+    if [[ "$actual_checksum" != "$expected_checksum" ]]; then
         rm -f "$tmpdir/$tarball"
         die "checksum verification failed for $tarball; the download was discarded"
     fi

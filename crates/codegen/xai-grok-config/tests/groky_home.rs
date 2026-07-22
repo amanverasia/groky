@@ -49,7 +49,10 @@ fn migration_copies_files_recursively() {
 
     let migrated = migrate_legacy_home(&legacy, &new).unwrap();
     assert!(migrated);
-    assert_eq!(std::fs::read_to_string(new.join("config.toml")).unwrap(), "x = 1");
+    assert_eq!(
+        std::fs::read_to_string(new.join("config.toml")).unwrap(),
+        "x = 1"
+    );
     assert_eq!(
         std::fs::read_to_string(new.join("sessions").join("nested").join("s.json")).unwrap(),
         "{}"
@@ -75,7 +78,11 @@ fn migration_preserves_0600_on_auth_json() {
     std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     assert!(migrate_legacy_home(&legacy, &new).unwrap());
-    let mode = std::fs::metadata(new.join("auth.json")).unwrap().permissions().mode() & 0o777;
+    let mode = std::fs::metadata(new.join("auth.json"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(mode, 0o600, "auth.json must stay 0600 after migration");
 }
 
@@ -104,7 +111,10 @@ fn migration_skipped_when_legacy_missing() {
     let legacy = tmp.path().join(".grok");
     let new = tmp.path().join(".groky");
     assert!(!migrate_legacy_home(&legacy, &new).unwrap());
-    assert!(!new.exists(), "no ~/.groky should be created by a no-op migration");
+    assert!(
+        !new.exists(),
+        "no ~/.groky should be created by a no-op migration"
+    );
 }
 
 #[cfg(unix)]
@@ -197,13 +207,19 @@ fn init_falls_back_to_fresh_groky_when_copy_fails() {
     std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(resolved, tmp.path().join(".groky"));
-    assert!(resolved.is_dir(), "fresh ~/.groky created despite copy failure");
+    assert!(
+        resolved.is_dir(),
+        "fresh ~/.groky created despite copy failure"
+    );
     assert_eq!(
         std::fs::read_dir(&resolved).unwrap().count(),
         0,
         "fallback ~/.groky must be fresh-empty, never a partial copy"
     );
-    assert!(legacy.join("config.toml").exists(), "legacy tree never deleted");
+    assert!(
+        legacy.join("config.toml").exists(),
+        "legacy tree never deleted"
+    );
     assert_no_staging_leftovers(tmp.path());
 }
 
@@ -222,20 +238,29 @@ fn failed_migration_leaves_no_partial_groky_and_retry_migrates_fully() {
     std::fs::create_dir_all(legacy.join("locked")).unwrap();
     std::fs::write(legacy.join("a.txt"), "a").unwrap();
     std::fs::write(legacy.join("locked").join("inner.txt"), "inner").unwrap();
-    std::fs::set_permissions(&legacy.join("locked"), std::fs::Permissions::from_mode(0o000))
-        .unwrap();
+    std::fs::set_permissions(
+        &legacy.join("locked"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
 
     if std::fs::read_dir(legacy.join("locked")).is_ok() {
-        std::fs::set_permissions(&legacy.join("locked"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(
+            &legacy.join("locked"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         eprintln!("skipping: cannot make subdir unreadable (running as root?)");
         return;
     }
 
     let result = migrate_legacy_home(&legacy, &new);
     // Restore perms first so TempDir cleanup works even if asserts fail.
-    std::fs::set_permissions(&legacy.join("locked"), std::fs::Permissions::from_mode(0o755))
-        .unwrap();
+    std::fs::set_permissions(
+        &legacy.join("locked"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
 
     assert!(result.is_err(), "mid-copy failure must surface as Err");
     assert!(
@@ -262,5 +287,8 @@ fn assert_no_staging_leftovers(home: &std::path::Path) {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| name.contains(".migrating"))
         .collect();
-    assert!(leftovers.is_empty(), "staging dirs left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "staging dirs left behind: {leftovers:?}"
+    );
 }

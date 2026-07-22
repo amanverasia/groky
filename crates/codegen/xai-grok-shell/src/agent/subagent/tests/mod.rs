@@ -606,7 +606,6 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         &Some(auto_wake.clone()),
         Some(&cmd_tx),
         "get_command_or_subagent_output",
-        &None,
     );
     match cmd_rx.try_recv().expect("expected synthetic Prompt") {
         SessionCommand::Prompt { prompt_id, verbatim, .. } => {

@@ -42,11 +42,12 @@ workdir=$(mktemp -d)
 server_pid=""
 install_dir=""
 install_dir2=""
+install_dir3=""
 cleanup() {
     if [ -n "$server_pid" ]; then
         kill "$server_pid" 2>/dev/null || true
     fi
-    rm -rf "$workdir" "$install_dir" "$install_dir2"
+    rm -rf "$workdir" "$install_dir" "$install_dir2" "$install_dir3"
 }
 trap cleanup EXIT
 
@@ -64,6 +65,7 @@ cp "$binary" "$repo_root/LICENSE" "$repo_root/THIRD-PARTY-NOTICES" \
     else
         shasum -a 256 "$tarball" > "$tarball.sha256"
     fi
+    cp "$tarball" "$tarball.pristine"
 )
 
 # --- Serve it over localhost --------------------------------------------------
@@ -114,5 +116,39 @@ if GROKY_DOWNLOAD_BASE="$base" GROKY_VERSION="$tag" \
     exit 1
 fi
 echo "PASS: checksum mismatch rejected"
+
+# --- Checksum sidecar must name exactly this tarball ----------------------------
+cp "$workdir/serve/$tarball.pristine" "$workdir/serve/$tarball"
+reject_sidecar() {
+    install_dir3=$(mktemp -d)
+    if GROKY_DOWNLOAD_BASE="$base" GROKY_VERSION="$tag" \
+        GROKY_INSTALL_DIR="$install_dir3" bash "$repo_root/install.sh" \
+        >/dev/null 2>&1; then
+        echo "FAIL: installer accepted $1" >&2
+        exit 1
+    fi
+    rm -rf "$install_dir3"
+    install_dir3=""
+}
+
+# A sidecar can otherwise make sha256sum check a trusted system file instead.
+printf '%s  /dev/null\n' \
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" \
+    > "$workdir/serve/$tarball.sha256"
+reject_sidecar "a checksum sidecar naming /dev/null"
+
+checksum=$(if command -v sha256sum >/dev/null; then
+    sha256sum "$workdir/serve/$tarball" | cut -d ' ' -f1
+else
+    shasum -a 256 "$workdir/serve/$tarball" | cut -d ' ' -f1
+fi)
+printf '%s  -\n' "$checksum" > "$workdir/serve/$tarball.sha256"
+reject_sidecar "a checksum sidecar naming -"
+printf 'not-a-checksum\n' > "$workdir/serve/$tarball.sha256"
+reject_sidecar "a malformed checksum sidecar"
+printf '%s  %s\n%s  %s\n' "$checksum" "$tarball" "$checksum" "$tarball" \
+    > "$workdir/serve/$tarball.sha256"
+reject_sidecar "a multiple-line checksum sidecar"
+echo "PASS: invalid checksum sidecars rejected"
 
 echo "All installer tests passed."

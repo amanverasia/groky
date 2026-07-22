@@ -248,13 +248,20 @@ fn build_unpinned(
         }
     }
 
-    push_interactive_login(
-        &mut methods,
-        has_enterprise_oidc,
-        enterprise_oidc_issuer,
-        login_label,
-        has_auth_provider_command,
-    );
+    // groky: the zero-config grok.com browser login is not advertised, so a
+    // credential-less first run lands in the app instead of a login screen.
+    // Interactive login is still offered when the user explicitly configured
+    // it: enterprise OIDC, an external auth provider command, or the
+    // `[auth] preferred_method = "oidc"` pin (see `build_pinned_oidc`).
+    if has_enterprise_oidc || has_auth_provider_command {
+        push_interactive_login(
+            &mut methods,
+            has_enterprise_oidc,
+            enterprise_oidc_issuer,
+            login_label,
+            has_auth_provider_command,
+        );
+    }
 
     BuiltAuthMethods {
         methods,
@@ -388,9 +395,9 @@ pub fn session_token_auth_gate(
 }
 
 pub const AUTH_ERROR_SESSION_EXPIRED: &str =
-    "Session expired. Run `grok login` to re-authenticate.";
+    "Session expired. Run `groky login` to re-authenticate.";
 
-pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `grok login`, set XAI_API_KEY, or add api_key to ~/.grok/config.toml.";
+pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `groky login`, set XAI_API_KEY, or add api_key to ~/.groky/config.toml.";
 
 /// Next ACP method id when `cached_token` cannot proceed (missing / expired /
 /// legacy WebLogin), or `None` when fallthrough is forbidden.
@@ -420,7 +427,7 @@ pub const PREFERRED_API_KEY_UNAVAILABLE: &str = "preferred_method=api_key but no
 
 /// Error when `preferred_method=oidc` but the session path cannot proceed.
 pub const PREFERRED_OIDC_UNAVAILABLE: &str =
-    "preferred_method=oidc but no session is available. Run `grok login` to authenticate.";
+    "preferred_method=oidc but no session is available. Run `groky login` to authenticate.";
 
 pub const XAI_API_KEY_METHOD_ID: &str = "xai.api_key";
 pub fn xai_api_key_auth_method() -> acp::AuthMethod {
@@ -689,9 +696,12 @@ mod tests {
     fn fresh_user_only_advertises_grok_com_and_requires_login() {
         let built = build_auth_methods(default_inputs());
 
-        assert_eq!(first_kind(&built.methods), Some(AuthMethodKind::GrokCom));
+        assert!(
+            built.methods.is_empty(),
+            "with api-key auth disabled and no cached token, nothing is \
+             advertised — groky never falls back to browser login",
+        );
         assert!(built.default_auth_method_id.is_none());
-        assert_eq!(built.methods.len(), 1);
     }
 
     /// Enterprise OIDC replaces `grok.com` (mutually exclusive). xai.api_key,
@@ -884,11 +894,10 @@ mod tests {
                 .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey),
             "xai.api_key must not be advertised when disable_api_key_auth is set",
         );
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::GrokCom),
-            "with api-key auth disabled and no cached token, the login method \
-             must lead so the pager requires interactive login",
+        assert!(
+            built.methods.is_empty(),
+            "with api-key auth disabled and no cached token, nothing is \
+             advertised — groky never falls back to browser login",
         );
         assert!(built.default_auth_method_id.is_none());
     }
@@ -1043,10 +1052,10 @@ mod tests {
             has_cached_token: mgr.current().is_some(),
             ..default_inputs()
         });
-        assert_eq!(
-            first_kind(&built.methods),
-            Some(AuthMethodKind::GrokCom),
-            "no cached token AND no api key: pager must show login (grok.com first)",
+        assert!(
+            built.methods.is_empty(),
+            "no cached token AND no api key: nothing is advertised — the \
+             pager lands in the app without a login screen",
         );
     }
 

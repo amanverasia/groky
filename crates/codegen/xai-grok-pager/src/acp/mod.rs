@@ -643,6 +643,38 @@ pub fn find_interactive_login_method(
     }
 }
 
+/// Outcome when eager auth failed or no methods were advertised: decide
+/// whether to block on the login screen. Pure and unit-testable.
+///
+/// - `xai.api_key` advertised: non-interactive credentials existed; a failed
+///   api_key must not open a browser — land in the app.
+/// - No interactive method advertised (groky removes the zero-config
+///   grok.com login): land in the app; the first turn surfaces the auth
+///   error and the welcome screen shows a credentials hint.
+/// - Otherwise (explicitly configured OIDC/provider login): block on the
+///   login screen with that method.
+fn login_fallback_outcome(
+    auth_methods: &[acp::AuthMethod],
+) -> (
+    bool,
+    Option<String>,
+    Option<acp::AuthMethodId>,
+    AuthStartMode,
+    Option<serde_json::Value>,
+) {
+    let has_api_key = auth_methods
+        .iter()
+        .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey);
+    if has_api_key {
+        return (false, None, None, AuthStartMode::Pending, None);
+    }
+    let (label, method_id, mode) = find_interactive_login_method(auth_methods);
+    if method_id.is_none() {
+        return (false, None, None, AuthStartMode::Pending, None);
+    }
+    (true, label, method_id, mode, None)
+}
+
 /// Attempt eager auth; on failure fall back to the interactive login screen.
 ///
 /// Errors from `authenticate` are caught so the connection still succeeds.
@@ -651,8 +683,9 @@ pub fn find_interactive_login_method(
 /// unpinned fallthrough; a failed api_key must not open a browser). Otherwise
 /// hand the interactive method for the login screen.
 ///
-/// Empty `auth_methods` (e.g. `preferred_method=api_key` with no key) is
-/// fail-closed: needs_login without an interactive method.
+/// Empty `auth_methods` (no credentials, and groky advertises no zero-config
+/// interactive login) lands in the app; the first turn surfaces the auth
+/// error and the welcome screen shows a credentials hint.
 ///
 /// Returns `(needs_login, login_label, login_method_id, auth_start_mode, auth_meta)`.
 async fn eager_auth_or_login_fallback(
@@ -671,8 +704,10 @@ async fn eager_auth_or_login_fallback(
     Option<serde_json::Value>,
 ) {
     if auth_methods.is_empty() {
-        // preferred_method pin unavailable — fail closed, no invented method.
-        return (true, None, None, AuthStartMode::Pending, None);
+        // No credentials and no interactive login (groky does not advertise
+        // the zero-config grok.com method): land in the app instead of a
+        // login screen with no working method.
+        return login_fallback_outcome(auth_methods);
     }
     if needs_login {
         return (
@@ -691,18 +726,7 @@ async fn eager_auth_or_login_fallback(
             auth_start_mode,
             meta,
         ),
-        Err(_) => {
-            // Non-interactive credentials were advertised; shell fallthrough
-            // already preferred them — do not auto-open browser login.
-            let has_api_key = auth_methods
-                .iter()
-                .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey);
-            if has_api_key {
-                return (false, login_label, login_method_id, auth_start_mode, None);
-            }
-            let (label, method_id, mode) = find_interactive_login_method(auth_methods);
-            (true, label, method_id, mode, None)
-        }
+        Err(_) => login_fallback_outcome(auth_methods),
     }
 }
 
@@ -973,6 +997,53 @@ mod tests {
         let meta = serde_json::json!({ "external_provider": false });
         let methods = vec![make_auth_method("grok.com", "grok.com", Some(meta))];
         let (_, _, _, mode) = startup_auth_metadata(&methods);
+        assert_eq!(mode, AuthStartMode::Pending);
+    }
+
+    // ── login_fallback_outcome ────────────────────────────────────
+
+    #[test]
+    fn login_fallback_empty_methods_lands_in_app() {
+        let (needs, label, id, mode, meta) = login_fallback_outcome(&[]);
+        assert!(
+            !needs,
+            "no methods at all: land in the app, not a dead login screen"
+        );
+        assert!(label.is_none() && id.is_none() && meta.is_none());
+        assert_eq!(mode, AuthStartMode::Pending);
+    }
+
+    #[test]
+    fn login_fallback_with_api_key_advertised_lands_in_app() {
+        use xai_grok_shell::agent::auth_method::xai_api_key_auth_method;
+        let methods = vec![xai_api_key_auth_method()];
+        let (needs, _, id, _, _) = login_fallback_outcome(&methods);
+        assert!(
+            !needs,
+            "failed api_key must not promote to interactive login"
+        );
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn login_fallback_without_interactive_method_lands_in_app() {
+        use xai_grok_shell::agent::auth_method::cached_token_auth_method;
+        let methods = vec![cached_token_auth_method()];
+        let (needs, _, id, _, _) = login_fallback_outcome(&methods);
+        assert!(
+            !needs,
+            "cached token failed and no interactive login is advertised: land in app",
+        );
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn login_fallback_with_interactive_method_blocks_on_login() {
+        use xai_grok_shell::agent::auth_method::oidc_auth_method;
+        let methods = vec![oidc_auth_method("https://sso.example.com", None)];
+        let (needs, label, id, mode, _) = login_fallback_outcome(&methods);
+        assert!(needs, "explicitly configured interactive login still gates");
+        assert!(label.is_some() && id.is_some());
         assert_eq!(mode, AuthStartMode::Pending);
     }
 
