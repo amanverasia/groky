@@ -53,18 +53,21 @@ fn modal_on_janus_row() -> ProvidersModalState {
 
 /// Render the modal into a buffer and return the flattened text.
 fn render_to_text(state: &mut ProvidersModalState) -> String {
+    render_to_lines(state).join("\n") + "\n"
+}
+
+fn render_to_lines(state: &mut ProvidersModalState) -> Vec<String> {
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     let theme = Theme::default();
     render_providers_overlay(&mut buf, area, state, false, &theme);
-    let mut out = String::new();
-    for y in 0..area.height {
-        for x in 0..area.width {
-            out.push_str(buf[(x, y)].symbol());
-        }
-        out.push('\n');
-    }
-    out
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
 }
 
 /// Drive the modal from the base-URL state to the API-key state using the
@@ -78,6 +81,91 @@ fn advance_to_key_screen(modal: &mut ProvidersModalState) {
         matches!(modal.mode, ProvidersMode::JanusApiKey { .. }),
         "expected JanusApiKey state"
     );
+}
+
+// ── Footer shortcuts match each Janus state ──────────────────────────
+
+#[test]
+fn janus_footer_shortcuts_match_each_state() {
+    let mut modal = modal_on_janus_row();
+    handle_providers_key(&mut modal, &key(KeyCode::Enter));
+    let base = render_to_text(&mut modal);
+    assert!(base.contains("Enter continue"), "{base}");
+    assert!(base.contains("Esc back"), "{base}");
+    assert!(!base.contains("Enter save"), "{base}");
+
+    modal.mode = ProvidersMode::JanusBaseUrl {
+        value: "http://192.168.1.50:20128/v1".into(),
+        insecure_confirmation_required: true,
+    };
+    let confirm = render_to_text(&mut modal);
+    assert!(confirm.contains("Enter confirm"), "{confirm}");
+    assert!(confirm.contains("Esc edit URL"), "{confirm}");
+
+    modal.mode = ProvidersMode::JanusApiKey {
+        base_url: JANUS_DEFAULT_BASE_URL.into(),
+        allow_insecure_http: false,
+        buffer: String::new(),
+    };
+    let key_screen = render_to_text(&mut modal);
+    assert!(key_screen.contains("Enter set up"), "{key_screen}");
+    assert!(key_screen.contains("Esc back"), "{key_screen}");
+
+    modal.mode = ProvidersMode::JanusChecking {
+        base_url: JANUS_DEFAULT_BASE_URL.into(),
+    };
+    let checking = render_to_text(&mut modal);
+    assert!(checking.contains("Esc close"), "{checking}");
+    assert!(!checking.contains("Enter select"), "{checking}");
+
+    modal.mode = ProvidersMode::JanusResult {
+        message: "Ready".into(),
+        cached_models: 0,
+    };
+    let result_lines = render_to_lines(&mut modal);
+    let shortcut_line = result_lines
+        .iter()
+        .position(|line| line.contains("Enter/Esc back"))
+        .expect("result shortcut must be rendered");
+    let bottom_border = result_lines
+        .iter()
+        .position(|line| line.contains('└') && line.contains('┘'))
+        .expect("modal bottom border must render");
+    assert_eq!(
+        shortcut_line + 1,
+        bottom_border,
+        "shortcut must be on the footer row immediately above the bottom border"
+    );
+    let result = result_lines.join("\n");
+    assert!(!result.contains("Enter select"), "{result}");
+}
+
+#[test]
+fn insecure_confirmation_escape_returns_to_editing_and_checking_escape_closes() {
+    let mut modal = modal_on_janus_row();
+    modal.mode = ProvidersMode::JanusBaseUrl {
+        value: "http://192.168.1.50:20128/v1".into(),
+        insecure_confirmation_required: true,
+    };
+    assert!(matches!(
+        route_providers_modal_key(&mut modal, &key(KeyCode::Esc)),
+        ProvidersOutcome::Changed
+    ));
+    assert!(matches!(
+        modal.mode,
+        ProvidersMode::JanusBaseUrl {
+            insecure_confirmation_required: false,
+            ..
+        }
+    ));
+
+    modal.mode = ProvidersMode::JanusChecking {
+        base_url: JANUS_DEFAULT_BASE_URL.into(),
+    };
+    assert!(matches!(
+        route_providers_modal_key(&mut modal, &key(KeyCode::Esc)),
+        ProvidersOutcome::Close
+    ));
 }
 
 // ── 1. Row selection opens base-URL entry with the exact default ─────

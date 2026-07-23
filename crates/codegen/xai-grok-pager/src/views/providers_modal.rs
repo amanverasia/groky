@@ -582,54 +582,32 @@ pub fn render_providers_overlay(
     compact: bool,
     theme: &Theme,
 ) {
-    let entering = matches!(
-        state.mode,
-        ProvidersMode::EnteringKey { .. }
-            | ProvidersMode::JanusBaseUrl { .. }
-            | ProvidersMode::JanusApiKey { .. }
-    );
-    let shortcuts: Vec<Shortcut> = if entering {
-        vec![
-            Shortcut {
-                label: "Enter save",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "Esc back",
-                clickable: false,
-                id: 0,
-            },
-        ]
-    } else {
-        vec![
-            Shortcut {
-                label: "\u{2191}/\u{2193} nav",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "Enter select",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "x clear key",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "r refresh",
-                clickable: false,
-                id: 0,
-            },
-            Shortcut {
-                label: "Esc close",
-                clickable: false,
-                id: 0,
-            },
-        ]
+    let labels: &[&str] = match &state.mode {
+        ProvidersMode::EnteringKey { .. } => &["Enter save", "Esc back"],
+        ProvidersMode::JanusBaseUrl {
+            insecure_confirmation_required: true,
+            ..
+        } => &["Enter confirm", "Esc edit URL"],
+        ProvidersMode::JanusBaseUrl { .. } => &["Enter continue", "Esc back"],
+        ProvidersMode::JanusApiKey { .. } => &["Enter set up", "Esc back"],
+        ProvidersMode::JanusChecking { .. } => &["Esc close"],
+        ProvidersMode::JanusResult { .. } => &["Enter/Esc back"],
+        ProvidersMode::List => &[
+            "\u{2191}/\u{2193} nav",
+            "Enter select",
+            "x clear key",
+            "r refresh",
+            "Esc close",
+        ],
     };
+    let shortcuts: Vec<Shortcut> = labels
+        .iter()
+        .map(|label| Shortcut {
+            label,
+            clickable: false,
+            id: 0,
+        })
+        .collect();
     let modal_config = ModalWindowConfig {
         title: "Providers",
         tabs: None,
@@ -746,7 +724,7 @@ pub fn render_providers_overlay(
                     buf.set_line(
                         content.x,
                         y,
-                        &Line::from(Span::styled("Enter continue \u{2022} Esc edit URL", dim)),
+                        &Line::from(Span::styled("Enter confirm \u{2022} Esc edit URL", dim)),
                         content.width,
                     );
                 }
@@ -827,7 +805,7 @@ pub fn render_providers_overlay(
                 buf.set_line(
                     content.x,
                     y,
-                    &Line::from(Span::styled("Enter/Esc back to providers", dim)),
+                    &Line::from(Span::styled("Return to providers", dim)),
                     content.width,
                 );
             }
