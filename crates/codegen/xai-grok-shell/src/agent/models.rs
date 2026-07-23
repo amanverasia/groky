@@ -150,6 +150,9 @@ struct Inner {
     /// registry — no manual fan-out, no listener-leak risk, no
     /// `unregister` API to maintain.
     model_switch_watch: tokio::sync::watch::Sender<u64>,
+    /// Serializes config/model commits so validation and mutation observe one
+    /// coherent catalog state.
+    config_apply_lock: parking_lot::Mutex<()>,
 }
 
 impl Default for ModelsManager {
@@ -194,6 +197,7 @@ impl ModelsManager {
                 retry_in_flight: AtomicBool::new(false),
                 allowlist_excludes_all: AtomicBool::new(false),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
+                config_apply_lock: parking_lot::Mutex::new(()),
             }),
         }
     }
@@ -305,21 +309,65 @@ impl ModelsManager {
     /// a credential or catalog change) and notify clients. No-op when no
     /// adapter is attached.
     pub fn rebuild_provider_models(&self) {
+        let _apply_guard = self.inner.config_apply_lock.lock();
+        self.rebuild_provider_models_locked();
+    }
+
+    fn rebuild_provider_models_locked(&self) {
         if let Some(adapter) = self.provider_catalog() {
-            self.set_provider_catalog(adapter);
+            self.set_provider_catalog_locked(adapter);
         }
+    }
+
+    /// Rebuild providers while the caller holds [`Self::config_transaction_guard`].
+    pub fn rebuild_provider_models_in_transaction(&self) {
+        self.rebuild_provider_models_locked();
     }
 
     /// Swap config, rebuild catalog, and reselect the model.
     ///
     /// Calls `reselect_default_model` when the preferred model changed
     /// (and is `Some`); otherwise `reselect_current_model_if_missing`.
-    pub fn apply_config(&self, new_config: config::Config) {
+    /// Preflight a configuration against prospective provider entries without
+    /// mutating the manager. Used to coordinate atomic provider/config reloads.
+    pub fn validate_config_with_provider_entries(
+        &self,
+        new_config: &config::Config,
+        provider_entries: IndexMap<String, ModelEntry>,
+    ) -> Result<(), String> {
+        new_config.validate_model_filters()?;
+        let prefetched = self.inner.prefetched.read().clone();
+        let new_catalog =
+            resolve_model_catalog_with_providers(new_config, prefetched, provider_entries);
+        if *self.inner.has_fetched_real_catalog.read() {
+            validate_selectable(new_config, &new_catalog)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply_config(&self, new_config: config::Config) -> Result<(), String> {
+        let _apply_guard = self.inner.config_apply_lock.lock();
+        self.apply_config_locked(new_config, true)
+    }
+
+    /// Acquire the publication gate shared by config apply, provider rebuild,
+    /// remote refresh, and disk-cache reload.
+    pub fn config_transaction_guard(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.inner.config_apply_lock.lock()
+    }
+
+    /// Apply a prevalidated config while the caller holds
+    /// [`Self::config_transaction_guard`].
+    pub fn apply_config_in_transaction(&self, new_config: config::Config) -> Result<(), String> {
+        self.apply_config_locked(new_config, false)
+    }
+
+    fn apply_config_locked(&self, new_config: config::Config, notify: bool) -> Result<(), String> {
         // Reject an invalid reload instead of mutating live state: bad globs or
         // (once a real catalog exists) an allowlist that excludes everything.
         if let Err(e) = new_config.validate_model_filters() {
             tracing::error!(error = %e, "ignoring config reload: invalid model filters");
-            return;
+            return Err(e);
         }
         let prefetched = self.inner.prefetched.read().clone();
         let new_catalog = resolve_model_catalog_with_providers(
@@ -330,7 +378,7 @@ impl ModelsManager {
         let has_real_catalog = *self.inner.has_fetched_real_catalog.read();
         if has_real_catalog && let Err(e) = validate_selectable(&new_config, &new_catalog) {
             tracing::error!(error = %e, "ignoring config reload: allowed_models excludes all models");
-            return;
+            return Err(e);
         }
 
         let (old_preferred, old_default_is_campaign) = {
@@ -385,13 +433,12 @@ impl ModelsManager {
             self.reselect_current_model_if_missing(&new_config);
         }
 
-        // Push the new catalog to connected clients (`x.ai/models/update`).
-        // Without this, a long-running agent (leader mode) correctly swaps
-        // its in-memory catalog on a config.toml `[model.*]`/`[models]` edit,
-        // but already-connected clients keep rendering the stale model list
-        // until they reconnect. No-op when no gateway is attached (tests,
-        // pre-init).
-        self.notify_models_updated();
+        // Push the new catalog unless a coordinated transaction will perform a
+        // final provider-cache rebuild and send the single consolidated update.
+        if notify {
+            self.notify_models_updated();
+        }
+        Ok(())
     }
 
     // ── Accessors ───────────────────────────────────────────────────
@@ -607,6 +654,14 @@ impl ModelsManager {
         &self,
         adapter: Arc<crate::agent::provider_catalog::ProviderCatalogAdapter>,
     ) {
+        let _apply_guard = self.inner.config_apply_lock.lock();
+        self.set_provider_catalog_locked(adapter);
+    }
+
+    fn set_provider_catalog_locked(
+        &self,
+        adapter: Arc<crate::agent::provider_catalog::ProviderCatalogAdapter>,
+    ) {
         *self.inner.provider_catalog.write() = Some(adapter);
         let cfg = self.inner.cfg.read().clone();
         let prefetched = self.inner.prefetched.read().clone();
@@ -648,7 +703,10 @@ impl ModelsManager {
                 .await;
             return;
         }
-        *self.inner.etag.write() = Some(etag.clone());
+        {
+            let _apply_guard = self.inner.config_apply_lock.lock();
+            *self.inner.etag.write() = Some(etag.clone());
+        }
         tracing::info!(etag = %etag, "models etag changed, refreshing");
         self.do_refresh(Some(etag), RefreshStrategy::Online);
     }
@@ -662,16 +720,21 @@ impl ModelsManager {
     ///
     /// Respects the auth snapshot / hot-swap discipline.
     pub async fn on_auth_changed(&self) {
-        let config = self.inner.cfg.read().clone();
-        crate::agent::init::update_telemetry_config(&config, &self.inner.auth_manager);
-        self.inner.cache.invalidate();
-        let has_session = self.inner.auth_manager.current_or_expired().is_some();
-        let fetch_auth = ModelFetchAuth::resolve(&config.endpoints, has_session);
-        *self.inner.fetch_auth.write() = fetch_auth;
+        let (config, fetch_auth) = {
+            let _apply_guard = self.inner.config_apply_lock.lock();
+            let config = self.inner.cfg.read().clone();
+            crate::agent::init::update_telemetry_config(&config, &self.inner.auth_manager);
+            self.inner.cache.invalidate();
+            let has_session = self.inner.auth_manager.current_or_expired().is_some();
+            let fetch_auth = ModelFetchAuth::resolve(&config.endpoints, has_session);
+            *self.inner.fetch_auth.write() = fetch_auth;
+            (config, fetch_auth)
+        };
         if self.inner.auth_manager.current_or_expired().is_none()
             && fetch_auth == ModelFetchAuth::Session
         {
-            self.clear();
+            let _apply_guard = self.inner.config_apply_lock.lock();
+            self.clear_locked();
             return;
         }
 
@@ -679,7 +742,7 @@ impl ModelsManager {
         // bundled defaults when we have never had a real catalog. Resolved once
         // so the fetch and the failure-vs-disabled classification below agree.
         let remote_fetch_enabled = crate::util::config::resolve_remote_fetch_enabled();
-        self.fetch_and_apply_inner(remote_fetch_enabled).await;
+        let refreshed = self.fetch_and_apply_inner(remote_fetch_enabled).await;
 
         if !*self.inner.has_fetched_real_catalog.read() && self.inner.prefetched.read().is_none() {
             if remote_fetch_enabled {
@@ -695,9 +758,6 @@ impl ModelsManager {
                 // Deliberate no-fetch state, not a failure: no warn-class log.
                 tracing::debug!("model catalog: bundled defaults in use (remote_fetch disabled)");
             }
-            self.rebuild(&config, None); // first-time only: no fetched catalog, use bundled defaults
-            self.reselect_current_model_if_missing(&config);
-
             // Schedule background retries so we recover once the network is
             // back (e.g. after sleep/resume when the first fetch races DNS).
             // With remote_fetch disabled a retry can never succeed, so none is
@@ -707,6 +767,20 @@ impl ModelsManager {
             }
         }
 
+        if refreshed {
+            return;
+        }
+        let _apply_guard = self.inner.config_apply_lock.lock();
+        // The fetch above awaited network and a config reload may have committed
+        // meanwhile. Always publish the fallback against the latest config.
+        let current_config = self.inner.cfg.read().clone();
+        if !*self.inner.has_fetched_real_catalog.read() && self.inner.prefetched.read().is_none() {
+            self.rebuild(&current_config, None);
+            self.reselect_current_model_if_missing(&current_config);
+        } else {
+            self.rebuild(&current_config, self.inner.prefetched.read().clone());
+            self.reselect_current_model_if_missing(&current_config);
+        }
         self.notify_models_updated();
     }
 
@@ -767,6 +841,7 @@ impl ModelsManager {
     /// `ModelsCacheManager` path is fixed to `grok_home()`, a process-wide
     /// `OnceLock`).
     fn reload_from_cache_manager(&self, cache: &ModelsCacheManager) {
+        let _apply_guard = self.inner.config_apply_lock.lock();
         let fetch_auth = *self.inner.fetch_auth.read();
         let Some(cached) = cache.load_fresh(&fetch_auth.cache_auth_method(), &self.cache_origin())
         else {
@@ -903,7 +978,6 @@ impl ModelsManager {
                         None,
                         Some(serde_json::json!({ "model_count": count })),
                     );
-                    mgr.notify_models_updated();
                 }
                 Err(e) => {
                     xai_grok_telemetry::unified_log::warn(
@@ -973,7 +1047,6 @@ impl ModelsManager {
                             })),
                         );
                     }
-                    mgr.notify_models_updated();
                 } else {
                     xai_grok_telemetry::unified_log::warn(
                         "model catalog: auth refresh watcher fetch failed",
@@ -989,6 +1062,11 @@ impl ModelsManager {
 
     /// Wipe in-memory state so a previous identity's catalog doesn't leak.
     fn clear(&self) {
+        let _apply_guard = self.inner.config_apply_lock.lock();
+        self.clear_locked();
+    }
+
+    fn clear_locked(&self) {
         *self.inner.prefetched.write() = None;
         *self.inner.models.write() = IndexMap::new();
         *self.inner.etag.write() = None;
@@ -1043,6 +1121,7 @@ impl ModelsManager {
     }
 
     fn try_load_cache(&self) -> bool {
+        let _apply_guard = self.inner.config_apply_lock.lock();
         let fetch_auth = *self.inner.fetch_auth.read();
         let Some(cached) = self
             .inner
@@ -1074,11 +1153,10 @@ impl ModelsManager {
         tokio::task::spawn(async move {
             let auth = auth_manager.auth().await.ok();
             let new_prefetched = fetch_models_async(endpoints, auth, fetch_auth).await;
-            if !mgr.apply_refresh_result(&cfg, new_prefetched, new_etag) {
+            if !mgr.apply_refresh_result(new_prefetched, new_etag) {
                 return;
             }
             tracing::info!("models manager refreshed");
-            mgr.notify_models_updated();
         });
     }
 
@@ -1122,17 +1200,18 @@ impl ModelsManager {
     }
 
     async fn fetch_and_apply(&self) {
-        self.fetch_and_apply_inner(crate::util::config::resolve_remote_fetch_enabled())
-            .await
+        let _ = self
+            .fetch_and_apply_inner(crate::util::config::resolve_remote_fetch_enabled())
+            .await;
     }
 
     /// `remote_fetch_enabled` is a parameter so tests can drive the gate
     /// without touching on-disk config layers.
-    async fn fetch_and_apply_inner(&self, remote_fetch_enabled: bool) {
+    async fn fetch_and_apply_inner(&self, remote_fetch_enabled: bool) -> bool {
         // Degrade to Offline: keep serving the current (cache/static) catalog.
         if !remote_fetch_enabled {
             tracing::info!("model catalog refresh skipped: remote_fetch disabled");
-            return;
+            return false;
         }
         let auth = self.inner.auth_manager.auth().await.ok();
         let has_auth = auth.is_some();
@@ -1147,7 +1226,7 @@ impl ModelsManager {
             })),
         );
         let new_prefetched = fetch_models_async(cfg.endpoints.clone(), auth, fetch_auth).await;
-        let success = self.apply_refresh_result(&cfg, new_prefetched, None);
+        let success = self.apply_refresh_result(new_prefetched, None);
         if success {
             xai_grok_telemetry::unified_log::info(
                 "model catalog: fetch succeeded",
@@ -1157,14 +1236,16 @@ impl ModelsManager {
                 })),
             );
         }
+        success
     }
 
     fn apply_refresh_result(
         &self,
-        config: &config::Config,
         new_prefetched: Option<IndexMap<String, ModelEntry>>,
         new_etag: Option<String>,
     ) -> bool {
+        let _apply_guard = self.inner.config_apply_lock.lock();
+        let config = self.inner.cfg.read().clone();
         let Some(new_prefetched) = new_prefetched else {
             tracing::warn!("model refresh failed, leaving existing models unchanged");
             xai_grok_telemetry::unified_log::warn(
@@ -1184,11 +1265,11 @@ impl ModelsManager {
             was_first
         };
         *self.inner.prefetched.write() = Some(new_prefetched.clone());
-        self.rebuild(config, Some(new_prefetched));
+        self.rebuild(&config, Some(new_prefetched));
         *self.inner.etag.write() = new_etag;
 
         // Can't exit a running app; flag it so the prompt path blocks instead.
-        let excludes_all = allowlist_matches_nothing(config, &self.inner.models.read());
+        let excludes_all = allowlist_matches_nothing(&config, &self.inner.models.read());
         self.inner
             .allowlist_excludes_all
             .store(excludes_all, Ordering::Relaxed);
@@ -1197,10 +1278,11 @@ impl ModelsManager {
         }
 
         if first_real_catalog {
-            self.reselect_default_model(config);
+            self.reselect_default_model(&config);
         } else {
-            self.reselect_current_model_if_missing(config);
+            self.reselect_current_model_if_missing(&config);
         }
+        self.notify_models_updated();
         true
     }
 
@@ -2595,7 +2677,7 @@ mod tests {
         *mgr.inner.etag.write() = Some("\"old\"".to_string());
 
         assert!(
-            !mgr.apply_refresh_result(&cfg, None, Some("\"new\"".to_string())),
+            !mgr.apply_refresh_result(None, Some("\"new\"".to_string())),
             "failed refresh should report no update"
         );
         assert_eq!(
@@ -2638,7 +2720,7 @@ mod tests {
         assert!(!mgr.has_fetched_real_catalog());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
 
         assert!(mgr.has_fetched_real_catalog());
         assert_eq!(mgr.current_model_id().0.as_ref(), "grok-3");
@@ -2651,7 +2733,7 @@ mod tests {
         cfg.models.default = Some("grok-3".to_string());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         // Simulate on_auth_changed clearing prefetched + etag.
@@ -2659,7 +2741,7 @@ mod tests {
         *mgr.inner.etag.write() = None;
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
 
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -2675,12 +2757,12 @@ mod tests {
         cfg.models.default = Some("grok-3".to_string());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         // Second refresh with grok-4 removed.
         let prefetched = make_prefetched(&["grok-3", "grok-4.5"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
 
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -2694,7 +2776,7 @@ mod tests {
         let mgr = test_manager();
         let cfg = config::Config::default();
 
-        mgr.apply_refresh_result(&cfg, None, None);
+        mgr.apply_refresh_result(None, None);
 
         assert!(
             !mgr.has_fetched_real_catalog(),
@@ -2711,7 +2793,7 @@ mod tests {
         cfg.models.default = Some("grok-3".to_string());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         // Simulate stale inner cfg (no default) from a racing auth refresh.
@@ -2721,7 +2803,7 @@ mod tests {
 
         let mut new_cfg = config::Config::default();
         new_cfg.models.default = Some("grok-3".to_string());
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
 
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -2736,13 +2818,13 @@ mod tests {
         let cfg = config::Config::default();
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
 
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         // Unrelated config change — preferred model unchanged.
         let new_cfg = config::Config::default();
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
 
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -2758,14 +2840,14 @@ mod tests {
         cfg.models.default = Some("grok-3".to_string());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
 
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         // Preferred model not in catalog — falls back to first entry.
         let mut new_cfg = config::Config::default();
         new_cfg.models.default = Some("grok-nonexistent".to_string());
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
 
         let current = mgr.current_model_id();
         let first_available = mgr.available().keys().next().unwrap().clone();
@@ -2781,10 +2863,10 @@ mod tests {
         let mgr = test_manager();
         let cfg = config::Config::default();
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
         let new_cfg = config::Config::default();
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
 
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -2800,14 +2882,14 @@ mod tests {
         cfg.models.default = Some("grok-3".to_string());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         assert_eq!(mgr.current_model_id().0.as_ref(), "grok-3");
 
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         // [models] default removed — is_some() guard prevents reset.
         let new_cfg = config::Config::default();
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
 
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -2826,7 +2908,7 @@ mod tests {
 
         // Initial fetch.
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
 
         // User runs /model grok-4.
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
@@ -2837,13 +2919,13 @@ mod tests {
 
         // Second fetch must preserve user's model.
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         assert_eq!(mgr.current_model_id().0.as_ref(), "grok-4");
 
         // Config reload with persisted preference.
         let mut new_cfg = config::Config::default();
         new_cfg.models.default = Some("grok-4".to_string());
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
         assert_eq!(mgr.current_model_id().0.as_ref(), "grok-4");
     }
 
@@ -2890,15 +2972,14 @@ mod tests {
         let cfg = config_from_toml("[models]\nallowed_models = [\"keep-*\"]");
 
         // Latch the flag: neither the fetched model nor the bundled defaults
-        // merged by `resolve_model_catalog` match `keep-*`.
-        mgr.apply_refresh_result(&cfg, Some(make_prefetched(&["other-1"])), None);
+        // merged by `resolve_model_catalog` match `keep-*`. Refresh publication
+        // reads the manager's latest committed config.
+        *mgr.inner.cfg.write() = cfg.clone();
+        mgr.apply_refresh_result(Some(make_prefetched(&["other-1"])), None);
         assert!(
             mgr.allowlist_excludes_all(),
             "setup: allowlist should exclude the entire catalog"
         );
-        // `apply_refresh_result` borrows the config without storing it, while
-        // `reload_from_cache_manager` reads `inner.cfg` — install it there.
-        *mgr.inner.cfg.write() = cfg.clone();
 
         // External process persists a catalog containing an allowed model.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2961,7 +3042,7 @@ mod tests {
         let mgr = test_manager();
         let cfg = config::Config::default();
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched.clone()), Some("etag-a".into()));
+        mgr.apply_refresh_result(Some(prefetched.clone()), Some("etag-a".into()));
         mgr.set_current_model_id(acp::ModelId::new("grok-4"));
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3097,7 +3178,7 @@ mod tests {
         cfg.models.default = Some("grok-3".to_string());
 
         let prefetched = make_prefetched(&["grok-3", "grok-4"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         assert!(mgr.has_fetched_real_catalog());
 
         mgr.clear();
@@ -3105,7 +3186,7 @@ mod tests {
 
         // New identity fetch — resolves default via reselect_default_model.
         let prefetched = make_prefetched(&["grok-4.5", "grok-4.3"]);
-        mgr.apply_refresh_result(&cfg, Some(prefetched), None);
+        mgr.apply_refresh_result(Some(prefetched), None);
         let first_available = mgr.available().keys().next().unwrap().clone();
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
@@ -3158,14 +3239,14 @@ mod tests {
         let mgr = test_manager();
         let mut cfg = config::Config::default();
         cfg.models.default = Some("alpha".to_string());
-        mgr.apply_refresh_result(&cfg, Some(make_prefetched(&["alpha", "beta"])), None);
+        mgr.apply_refresh_result(Some(make_prefetched(&["alpha", "beta"])), None);
         *mgr.inner.cfg.write() = cfg.clone(); // old_preferred = "alpha"
         assert_eq!(mgr.current_model_id().0.as_ref(), "alpha");
 
         let mut new_cfg = config::Config::default();
         new_cfg.models.default = Some("beta".to_string());
         new_cfg.models.default_is_campaign_driven = true; // campaign overriding
-        mgr.apply_config(new_cfg);
+        mgr.apply_config(new_cfg).unwrap();
         assert_eq!(
             mgr.current_model_id().0.as_ref(),
             "alpha",
@@ -3176,11 +3257,11 @@ mod tests {
         let mgr2 = test_manager();
         let mut cfg2 = config::Config::default();
         cfg2.models.default = Some("alpha".to_string());
-        mgr2.apply_refresh_result(&cfg2, Some(make_prefetched(&["alpha", "beta"])), None);
         *mgr2.inner.cfg.write() = cfg2.clone();
+        mgr2.apply_refresh_result(Some(make_prefetched(&["alpha", "beta"])), None);
         let mut new_cfg2 = config::Config::default();
         new_cfg2.models.default = Some("beta".to_string());
-        mgr2.apply_config(new_cfg2);
+        mgr2.apply_config(new_cfg2).unwrap();
         assert_eq!(
             mgr2.current_model_id().0.as_ref(),
             "beta",
