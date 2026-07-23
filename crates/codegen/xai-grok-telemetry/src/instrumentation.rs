@@ -96,8 +96,9 @@ fn default_output_path(mode: InstrumentationMode) -> PathBuf {
 /// `Box<dyn Layer<S>>`, the type information needed for registration is lost,
 /// causing a panic: "a Filtered layer was used, but it had no FilterId".
 ///
-/// This wrapper avoids that issue by implementing filtering in the `enabled()`
-/// method directly, without using the per-layer filter mechanism.
+/// This wrapper avoids that issue by filtering forwarded callbacks directly,
+/// without using the per-layer filter mechanism. Its `enabled()` result only
+/// delegates for matching metadata, so it cannot suppress sibling callsites.
 pub struct TargetFilterLayer<L, S> {
     inner: L,
     target: &'static str,
@@ -120,7 +121,11 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     fn enabled(&self, metadata: &tracing::Metadata<'_>, ctx: Context<'_, S>) -> bool {
-        metadata.target() == self.target && self.inner.enabled(metadata, ctx)
+        // `enabled` is evaluated by the composed subscriber, not just this layer.
+        // Returning `false` for a non-matching target would therefore prevent sibling
+        // layers from observing that callsite. Only consult the inner layer for its
+        // target; filter non-matching callbacks before forwarding them.
+        metadata.target() != self.target || self.inner.enabled(metadata, ctx)
     }
 
     fn on_new_span(
@@ -140,7 +145,12 @@ where
         values: &tracing::span::Record<'_>,
         ctx: Context<'_, S>,
     ) {
-        self.inner.on_record(span, values, ctx);
+        if ctx
+            .metadata(span)
+            .is_some_and(|metadata| metadata.target() == self.target)
+        {
+            self.inner.on_record(span, values, ctx);
+        }
     }
 
     fn on_follows_from(
@@ -149,7 +159,12 @@ where
         follows: &tracing::span::Id,
         ctx: Context<'_, S>,
     ) {
-        self.inner.on_follows_from(span, follows, ctx);
+        if ctx
+            .metadata(span)
+            .is_some_and(|metadata| metadata.target() == self.target)
+        {
+            self.inner.on_follows_from(span, follows, ctx);
+        }
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
@@ -159,15 +174,30 @@ where
     }
 
     fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-        self.inner.on_enter(id, ctx);
+        if ctx
+            .metadata(id)
+            .is_some_and(|metadata| metadata.target() == self.target)
+        {
+            self.inner.on_enter(id, ctx);
+        }
     }
 
     fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-        self.inner.on_exit(id, ctx);
+        if ctx
+            .metadata(id)
+            .is_some_and(|metadata| metadata.target() == self.target)
+        {
+            self.inner.on_exit(id, ctx);
+        }
     }
 
     fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
-        self.inner.on_close(id, ctx);
+        if ctx
+            .metadata(&id)
+            .is_some_and(|metadata| metadata.target() == self.target)
+        {
+            self.inner.on_close(id, ctx);
+        }
     }
 }
 
@@ -625,4 +655,229 @@ impl Drop for InstrumentationTimer {
 
 pub fn timer(name: &'static str) -> InstrumentationTimer {
     InstrumentationTimer::new(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
+
+    use super::{TARGET, TargetFilterLayer};
+
+    #[derive(Clone, Default)]
+    struct RecordingLayer {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingLayer {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("recording lock poisoned").clone()
+        }
+
+        fn record(&self, callback: &str, target: &str, name: &str) {
+            self.calls
+                .lock()
+                .expect("recording lock poisoned")
+                .push(format!("{callback}:{target}:{name}"));
+        }
+    }
+
+    impl<S> Layer<S> for RecordingLayer
+    where
+        S: Subscriber + for<'span> LookupSpan<'span>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            self.record("new", attrs.metadata().target(), attrs.metadata().name());
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::span::Id,
+            _values: &tracing::span::Record<'_>,
+            ctx: Context<'_, S>,
+        ) {
+            let metadata = ctx.metadata(id).expect("span metadata must exist");
+            self.record("record", metadata.target(), metadata.name());
+        }
+
+        fn on_follows_from(
+            &self,
+            span: &tracing::span::Id,
+            follows: &tracing::span::Id,
+            ctx: Context<'_, S>,
+        ) {
+            let span_metadata = ctx.metadata(span).expect("span metadata must exist");
+            let follows_metadata = ctx.metadata(follows).expect("span metadata must exist");
+            self.record("follows", span_metadata.target(), follows_metadata.target());
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            self.record("event", event.metadata().target(), "event");
+        }
+
+        fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+            let metadata = ctx.metadata(id).expect("span metadata must exist");
+            self.record("enter", metadata.target(), metadata.name());
+        }
+
+        fn on_exit(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+            let metadata = ctx.metadata(id).expect("span metadata must exist");
+            self.record("exit", metadata.target(), metadata.name());
+        }
+
+        fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
+            let metadata = ctx.metadata(&id).expect("span metadata must exist");
+            self.record("close", metadata.target(), metadata.name());
+        }
+    }
+
+    fn with_subscriber(filtered: RecordingLayer, sibling: RecordingLayer, emit: impl FnOnce()) {
+        let subscriber = tracing_subscriber::registry::Registry::default()
+            .with(TargetFilterLayer::new(filtered, TARGET))
+            .with(sibling);
+        tracing::subscriber::with_default(subscriber, emit);
+    }
+
+    #[derive(Clone)]
+    struct RejectingUnrelatedLayer {
+        recording: RecordingLayer,
+    }
+
+    impl RejectingUnrelatedLayer {
+        fn new(recording: RecordingLayer) -> Self {
+            Self { recording }
+        }
+    }
+
+    impl<S> Layer<S> for RejectingUnrelatedLayer
+    where
+        S: Subscriber + for<'span> LookupSpan<'span>,
+    {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+            metadata.target() != "unrelated"
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+            self.recording.on_event(event, ctx);
+        }
+    }
+
+    #[test]
+    fn target_filter_does_not_globally_suppress_unrelated_sibling_events() {
+        let filtered = RecordingLayer::default();
+        let sibling = RecordingLayer::default();
+        let subscriber = tracing_subscriber::registry::Registry::default()
+            .with(TargetFilterLayer::new(
+                RejectingUnrelatedLayer::new(filtered.clone()),
+                TARGET,
+            ))
+            .with(sibling.clone());
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: TARGET, "matching event");
+            tracing::info!(target: "unrelated", "unrelated event");
+        });
+
+        assert_eq!(
+            filtered.calls(),
+            vec!["event:xai_grok_instrumentation:event"]
+        );
+        assert_eq!(
+            sibling.calls(),
+            vec![
+                "event:xai_grok_instrumentation:event",
+                "event:unrelated:event",
+            ],
+        );
+    }
+
+    #[test]
+    fn target_filter_isolates_follows_from_by_source_span_target() {
+        let filtered = RecordingLayer::default();
+        let sibling = RecordingLayer::default();
+
+        with_subscriber(filtered.clone(), sibling.clone(), || {
+            let matching_source = tracing::info_span!(target: TARGET, "matching_source");
+            let unrelated_source = tracing::info_span!(target: "unrelated", "unrelated_source");
+            let matching_follows = tracing::info_span!(target: TARGET, "matching_follows");
+            let unrelated_follows = tracing::info_span!(target: "unrelated", "unrelated_follows");
+
+            matching_source.follows_from(&unrelated_follows);
+            unrelated_source.follows_from(&matching_follows);
+        });
+
+        let filtered_follows: Vec<_> = filtered
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("follows:"))
+            .collect();
+        assert_eq!(
+            filtered_follows,
+            vec!["follows:xai_grok_instrumentation:unrelated"]
+        );
+
+        let sibling_follows: Vec<_> = sibling
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("follows:"))
+            .collect();
+        assert_eq!(
+            sibling_follows,
+            vec![
+                "follows:xai_grok_instrumentation:unrelated",
+                "follows:unrelated:xai_grok_instrumentation",
+            ],
+        );
+    }
+
+    #[test]
+    fn target_filter_isolates_span_lifecycle_callbacks() {
+        let filtered = RecordingLayer::default();
+        let sibling = RecordingLayer::default();
+
+        with_subscriber(filtered.clone(), sibling.clone(), || {
+            let matching =
+                tracing::info_span!(target: TARGET, "matching_span", value = tracing::field::Empty);
+            matching.record("value", 1);
+            {
+                let _entered = matching.enter();
+            }
+            drop(matching);
+
+            let unrelated = tracing::info_span!(target: "unrelated", "unrelated_span", value = tracing::field::Empty);
+            unrelated.record("value", 2);
+            {
+                let _entered = unrelated.enter();
+            }
+            drop(unrelated);
+        });
+
+        let matching_lifecycle = vec![
+            "new:xai_grok_instrumentation:matching_span",
+            "record:xai_grok_instrumentation:matching_span",
+            "enter:xai_grok_instrumentation:matching_span",
+            "exit:xai_grok_instrumentation:matching_span",
+            "close:xai_grok_instrumentation:matching_span",
+        ];
+        assert_eq!(filtered.calls(), matching_lifecycle);
+
+        let mut expected_sibling = matching_lifecycle;
+        expected_sibling.extend([
+            "new:unrelated:unrelated_span",
+            "record:unrelated:unrelated_span",
+            "enter:unrelated:unrelated_span",
+            "exit:unrelated:unrelated_span",
+            "close:unrelated:unrelated_span",
+        ]);
+        assert_eq!(sibling.calls(), expected_sibling);
+    }
 }
