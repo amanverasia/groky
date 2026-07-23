@@ -1116,7 +1116,7 @@ Expected: `NO NETWORK CONNECTIONS` (unix sockets to the local leader are fine). 
 - Modify: `README.md` (Installation section)
 - Modify: `Cargo.lock` (regenerated)
 
-- [ ] **Step 11.1: Bump the binary version**
+- [x] **Step 11.1: Bump the binary version**
 
 In `crates/codegen/xai-grok-pager-bin/Cargo.toml` change:
 
@@ -1136,7 +1136,7 @@ Then refresh the lockfile:
 cargo check -p xai-grok-pager-bin
 ```
 
-- [ ] **Step 11.2: README update note**
+- [x] **Step 11.2: README update note**
 
 In `README.md`, in the "One-line installer" subsection, after the sentence "The script verifies the sha256 checksum of every download.", add:
 
@@ -1145,7 +1145,7 @@ groky never checks for updates or phones home; to update, re-run the
 installer.
 ```
 
-- [ ] **Step 11.3: Verify version output**
+- [x] **Step 11.3: Verify version output**
 
 ```bash
 cargo build --release -p xai-grok-pager-bin && ./target/release/groky --version
@@ -1153,7 +1153,7 @@ cargo build --release -p xai-grok-pager-bin && ./target/release/groky --version
 
 Expected: `groky 0.1.1 ...` (the release smoke test requires the tag and binary version to agree before tagging `v0.1.1`).
 
-- [ ] **Step 11.4: Commit**
+- [x] **Step 11.4: Commit**
 
 ```bash
 git add crates/codegen/xai-grok-pager-bin/Cargo.toml Cargo.lock README.md
@@ -1164,6 +1164,6 @@ git commit -m "chore: bump groky to 0.1.1, document installer-based updates"
 
 ## Task 12: Integrate and release
 
-- [ ] **Step 12.1: Push the branch and open a PR** (use the finishing-a-development-branch skill; PR title: "Portable ARM builds, no login, no phone-home — v0.1.1")
+- [x] **Step 12.1: Push the branch and open a PR** (use the finishing-a-development-branch skill; PR title: "Portable ARM builds, no login, no phone-home — v0.1.1")
 - [ ] **Step 12.2: After merge, tag `v0.1.1`** — the release workflow builds, smoke-tests, and publishes assets (only on explicit user go-ahead).
 - [ ] **Step 12.3: Empirical SIGILL verification** — on the Oracle Ampere A1 host: `curl -fsSL https://raw.githubusercontent.com/amanverasia/groky/main/install.sh | bash && groky --version`. Expected: `groky 0.1.1`, no illegal instruction. Optionally pre-verify the artifact locally with `qemu-aarch64 -cpu neoverse-n1 ./groky --version` if qemu-user is installed.
