@@ -23,6 +23,39 @@ pub enum AuthScheme {
     XApiKey,
 }
 
+/// A serializable, credential-free diagnostic view of [`SamplerConfig`].
+///
+/// This is intentionally a crate-private, one-way projection. It contains
+/// operational settings and presence flags, never credential, header, user-ID,
+/// or client-identity values. `model` is retained as necessary operational
+/// context; callers must not place secrets in model identifiers.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SamplerConfigSnapshot {
+    pub has_api_key: bool,
+    pub endpoint_identity: String,
+    pub model: String,
+    pub max_completion_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub api_backend: ApiBackend,
+    pub auth_scheme: AuthScheme,
+    pub extra_header_names: Vec<String>,
+    pub context_window: u64,
+    pub force_http1: bool,
+    pub max_retries: Option<u32>,
+    pub stream_tool_calls: bool,
+    pub idle_timeout_secs: Option<u64>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub has_user_id: bool,
+    pub has_attribution_callback: bool,
+    pub has_bearer_resolver: bool,
+    pub supports_backend_search: bool,
+    pub compactions_remaining: Option<CompactionsRemaining>,
+    pub compaction_at_tokens: Option<CompactionAtTokens>,
+    pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
+    pub has_header_injector: bool,
+}
+
 /// All knobs that control a single sampling request.
 ///
 /// The session typically owns one `SamplerConfig` per active model
@@ -45,7 +78,7 @@ pub enum AuthScheme {
 /// `SamplerConfig` is handed to the actor. Auth is selected separately
 /// via `auth_scheme`, while `api_backend` controls only the request/response
 /// protocol shape.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct SamplerConfig {
     pub api_key: Option<String>,
     pub base_url: String,
@@ -54,7 +87,6 @@ pub struct SamplerConfig {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: ApiBackend,
-    #[serde(default)]
     pub auth_scheme: AuthScheme,
     /// Extra request headers applied verbatim. The sampler never inspects
     /// the URL to derive headers; callers (the session) inject proxy auth
@@ -87,29 +119,17 @@ pub struct SamplerConfig {
     /// of stale-token vs. server-rejected-live-token 401s). `None`
     /// (default) is a no-op -- the 401 arm returns the same
     /// `SamplingError::Auth` it always did.
-    ///
-    /// `Arc<dyn Trait>` is not serializable, so the field is skipped
-    /// in (de)serialization. Round-tripping a config through serde
-    /// drops the callback; callers that deserialize a `SamplerConfig`
-    /// from disk must re-attach the callback before passing it to
-    /// [`crate::SamplingClient::new`] or 401 attribution will be
-    /// silently disabled for the rebuilt client.
-    #[serde(skip)]
     pub attribution_callback: Option<SharedAttributionCallback>,
 
     /// Live bearer resolve per request. `None` uses construction-time `api_key`.
-    #[serde(skip)]
     pub bearer_resolver: Option<SharedBearerResolver>,
 
-    #[serde(default)]
     pub supports_backend_search: bool,
 
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
-    #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
 
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
-    #[serde(default)]
     pub compaction_at_tokens: Option<CompactionAtTokens>,
 
     /// Server-side doom-loop check policy; `None` disables it. When set, the
@@ -118,55 +138,68 @@ pub struct SamplerConfig {
     /// events (unlike the environment headers in [`Self::extra_headers`],
     /// this header gates the client's own decode behavior, so it lives with
     /// the decoder).
-    #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
 
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
-    #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
 }
 
-/// Manual `Debug` so the configured credential can never leak through
-/// debug renderings (logs, `{:?}` in errors, snapshots). Secrets are
-/// reduced to boolean presence flags; `extra_headers` values may carry
-/// proxy credentials, so only the header *names* are printed.
+impl SamplerConfig {
+    /// Return a serializable diagnostics projection with secrets redacted.
+    pub(crate) fn safe_snapshot(&self) -> SamplerConfigSnapshot {
+        let mut extra_header_names = self.extra_headers.keys().cloned().collect::<Vec<_>>();
+        extra_header_names.sort_unstable();
+
+        SamplerConfigSnapshot {
+            has_api_key: self.api_key.is_some(),
+            endpoint_identity: endpoint_identity(&self.base_url),
+            model: self.model.clone(),
+            max_completion_tokens: self.max_completion_tokens,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            api_backend: self.api_backend.clone(),
+            auth_scheme: self.auth_scheme,
+            extra_header_names,
+            context_window: self.context_window,
+            force_http1: self.force_http1,
+            max_retries: self.max_retries,
+            stream_tool_calls: self.stream_tool_calls,
+            idle_timeout_secs: self.idle_timeout_secs,
+            reasoning_effort: self.reasoning_effort,
+            has_user_id: self.user_id.is_some(),
+            has_attribution_callback: self.attribution_callback.is_some(),
+            has_bearer_resolver: self.bearer_resolver.is_some(),
+            supports_backend_search: self.supports_backend_search,
+            compactions_remaining: self.compactions_remaining,
+            compaction_at_tokens: self.compaction_at_tokens,
+            doom_loop_recovery: self.doom_loop_recovery,
+            has_header_injector: self.header_injector.is_some(),
+        }
+    }
+}
+
+/// Return a stable endpoint identity without URL credentials or request parts.
+pub(crate) fn endpoint_identity(base_url: &str) -> String {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return "invalid".to_owned();
+    };
+    let Some(host) = url.host() else {
+        return "invalid".to_owned();
+    };
+
+    let mut identity = format!("{}://{host}", url.scheme());
+    if let Some(port) = url.port() {
+        identity.push(':');
+        identity.push_str(&port.to_string());
+    }
+    identity
+}
+
+/// Manual `Debug` delegates to the vetted diagnostics projection so secret
+/// redaction cannot drift between debug output and serialized diagnostics.
 impl std::fmt::Debug for SamplerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SamplerConfig")
-            .field("has_api_key", &self.api_key.is_some())
-            .field("base_url", &self.base_url)
-            .field("model", &self.model)
-            .field("max_completion_tokens", &self.max_completion_tokens)
-            .field("temperature", &self.temperature)
-            .field("top_p", &self.top_p)
-            .field("api_backend", &self.api_backend)
-            .field("auth_scheme", &self.auth_scheme)
-            .field(
-                "extra_header_names",
-                &self.extra_headers.keys().collect::<Vec<_>>(),
-            )
-            .field("context_window", &self.context_window)
-            .field("force_http1", &self.force_http1)
-            .field("max_retries", &self.max_retries)
-            .field("stream_tool_calls", &self.stream_tool_calls)
-            .field("idle_timeout_secs", &self.idle_timeout_secs)
-            .field("reasoning_effort", &self.reasoning_effort)
-            .field("origin_client", &self.origin_client)
-            .field("client_identifier", &self.client_identifier)
-            .field("deployment_id", &self.deployment_id)
-            .field("has_user_id", &self.user_id.is_some())
-            .field("client_version", &self.client_version)
-            .field(
-                "has_attribution_callback",
-                &self.attribution_callback.is_some(),
-            )
-            .field("has_bearer_resolver", &self.bearer_resolver.is_some())
-            .field("supports_backend_search", &self.supports_backend_search)
-            .field("compactions_remaining", &self.compactions_remaining)
-            .field("compaction_at_tokens", &self.compaction_at_tokens)
-            .field("doom_loop_recovery", &self.doom_loop_recovery)
-            .field("has_header_injector", &self.header_injector.is_some())
-            .finish_non_exhaustive()
+        self.safe_snapshot().fmt(f)
     }
 }
 
@@ -262,29 +295,56 @@ mod tests {
         );
     }
 
-    /// Configs serialized before the field existed must keep deserializing.
     #[test]
-    fn config_without_doom_loop_recovery_deserializes_to_none() {
-        let mut stripped = serde_json::to_value(SamplerConfig::default()).unwrap();
-        stripped
-            .as_object_mut()
-            .unwrap()
-            .remove("doom_loop_recovery");
-        let config: SamplerConfig = serde_json::from_value(stripped).unwrap();
-        assert!(config.doom_loop_recovery.is_none());
-
-        let with_policy = SamplerConfig {
-            doom_loop_recovery: Some(DoomLoopRecoveryPolicy {
-                max_threshold: 8,
-                max_retries: 2,
-            }),
+    fn safe_snapshot_json_redacts_url_credentials_and_request_parts() {
+        let api_key_canary = "sk-janus-super-secret-0123456789";
+        let header_value_canary = "proxy-secret-janus-987654321";
+        let user_id_canary = "user-secret-janus-abcdef";
+        let url_userinfo_canary = "url-user-secret-janus";
+        let url_query_canary = "url-query-secret-janus";
+        let url_fragment_canary = "url-fragment-secret-janus";
+        let config = SamplerConfig {
+            api_key: Some(api_key_canary.to_owned()),
+            base_url: format!(
+                "https://{url_userinfo_canary}:url-password@api.example.test:8443/v1/{url_query_canary}?token={url_query_canary}%2Fjson%22#fragment={url_fragment_canary}%2Fjson%22"
+            ),
+            model: "openai/gpt-4o".to_owned(),
+            extra_headers: IndexMap::from([
+                ("X-Zebra-Trace".to_owned(), header_value_canary.to_owned()),
+                (
+                    "Authorization".to_owned(),
+                    "another-secret-value".to_owned(),
+                ),
+            ]),
+            user_id: Some(user_id_canary.to_owned()),
             ..Default::default()
         };
-        let round_tripped: SamplerConfig =
-            serde_json::from_value(serde_json::to_value(&with_policy).unwrap()).unwrap();
-        assert_eq!(
-            round_tripped.doom_loop_recovery,
-            with_policy.doom_loop_recovery
-        );
+
+        let rendered = serde_json::to_string(&config.safe_snapshot()).unwrap();
+        for canary in [
+            api_key_canary,
+            "sk-janus",
+            header_value_canary,
+            "proxy-secret-janus",
+            user_id_canary,
+            "user-secret-janus",
+            url_userinfo_canary,
+            "url-user-secret",
+            url_query_canary,
+            "url-query-secret",
+            url_fragment_canary,
+            "url-fragment-secret",
+            "%2Fjson%22",
+            "/json\"",
+        ] {
+            assert!(
+                !rendered.contains(canary),
+                "secret or request URL part leaked: {canary}; rendered: {rendered}"
+            );
+        }
+        assert!(rendered.contains("\"endpoint_identity\":\"https://api.example.test:8443\""));
+        assert!(rendered.contains("\"has_api_key\":true"));
+        assert!(rendered.contains("\"has_user_id\":true"));
+        assert!(rendered.contains("\"extra_header_names\":[\"Authorization\",\"X-Zebra-Trace\"]"));
     }
 }
