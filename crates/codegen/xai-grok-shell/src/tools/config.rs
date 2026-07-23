@@ -161,6 +161,8 @@ impl WebFetchToolConfig {
 #[serde(default)]
 pub struct ShellToolsetConfig {
     pub bash: BashToolConfig,
+    /// Runtime-only sampler state built from live credentials, never persisted.
+    #[serde(skip, default)]
     pub web_search: SamplerConfig,
     /// Web fetch tool parameters (`[toolset.web_fetch]`).
     #[serde(default)]
@@ -517,6 +519,38 @@ mod tests {
         assert_eq!(standard, FileToolset::Standard);
         let hashline: FileToolset = serde_json::from_str("\"hashline\"").unwrap();
         assert_eq!(hashline, FileToolset::Hashline);
+    }
+
+    #[test]
+    fn shell_toolset_serde_skips_runtime_web_search_and_preserves_toml_fields() {
+        let config: ShellToolsetConfig = toml::from_str(
+            r#"
+                file_toolset = "hashline"
+
+                [bash]
+                timeout_secs = 42.0
+
+                [hashline]
+                scheme = "content_only"
+                hash_len = 2
+                chunk_size = 16
+            "#,
+        )
+        .expect("toolset TOML should parse");
+        assert_eq!(config.bash.timeout_secs, Some(42.0));
+        assert_eq!(config.file_toolset, FileToolset::Hashline);
+        assert_eq!(config.hashline.scheme, "content_only");
+        assert!(config.web_search.api_key.is_none());
+        assert!(config.web_search.extra_headers.is_empty());
+        assert!(config.web_search.model.is_empty());
+
+        let serialized = toml::to_string(&config).expect("toolset should serialize");
+        assert!(
+            !serialized.contains("web_search"),
+            "runtime web-search state must not serialize: {serialized}"
+        );
+        assert!(serialized.contains("timeout_secs = 42.0"));
+        assert!(serialized.contains("file_toolset = \"hashline\""));
     }
 
     // -- resolve_file_toolset precedence tests ---

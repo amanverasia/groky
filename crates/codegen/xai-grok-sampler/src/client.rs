@@ -295,7 +295,10 @@ pub struct SamplingClient {
 impl std::fmt::Debug for SamplingClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SamplingClient")
-            .field("base_url", &self.base_url)
+            .field(
+                "endpoint_identity",
+                &crate::config::endpoint_identity(&self.base_url),
+            )
             .field("defaults", &self.defaults)
             .field(
                 "has_attribution_callback",

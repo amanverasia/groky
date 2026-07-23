@@ -13018,6 +13018,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "xai-grok-sampling-types",
  "xai-grok-test-support",
