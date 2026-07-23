@@ -40,6 +40,8 @@ pub enum HttpError {
     MissingHost,
     #[error("URLs must not embed credentials (userinfo)")]
     CredentialsInUrl,
+    #[error("endpoint override must be a query-free, fragment-free path on the provider origin")]
+    InvalidEndpointOverride,
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
     #[error("too many redirects (limit {MAX_REDIRECTS})")]
@@ -78,11 +80,20 @@ pub fn derive_endpoint(
 ) -> Result<Url, HttpError> {
     let base_url = Url::parse(base).map_err(|err| HttpError::InvalidUrl(err.to_string()))?;
     let endpoint = match override_path {
-        Some(path) => base_url
-            .join(path)
-            .map_err(|err| HttpError::InvalidUrl(err.to_string()))?,
+        Some(path) => {
+            if !path.starts_with('/') || path.starts_with("//") {
+                return Err(HttpError::InvalidEndpointOverride);
+            }
+            let endpoint = base_url
+                .join(path)
+                .map_err(|err| HttpError::InvalidUrl(err.to_string()))?;
+            if endpoint.query().is_some() || endpoint.fragment().is_some() {
+                return Err(HttpError::InvalidEndpointOverride);
+            }
+            endpoint
+        }
         None => {
-            let mut url = base_url;
+            let mut url = base_url.clone();
             let joined = format!("{}/{}", url.path().trim_end_matches('/'), default_leaf);
             url.set_path(&joined);
             url
@@ -91,6 +102,9 @@ pub fn derive_endpoint(
     // Scheme, host, and userinfo checks apply regardless of the insecure-http
     // opt-in, which is enforced against the resolved flag in `get_bounded`.
     validate_url(&endpoint, true)?;
+    if !same_origin(&base_url, &endpoint) {
+        return Err(HttpError::InvalidEndpointOverride);
+    }
     Ok(endpoint)
 }
 
@@ -267,6 +281,34 @@ mod tests {
         assert_eq!(
             derive_endpoint(
                 "https://gateway.example/api",
+                Some("/custom/models"),
+                "models"
+            )
+            .unwrap()
+            .as_str(),
+            "https://gateway.example/custom/models"
+        );
+    }
+
+    #[test]
+    fn endpoint_overrides_stay_on_origin_and_cannot_carry_request_parts() {
+        for override_path in [
+            "https://attacker.example/models",
+            "//attacker.example/models",
+            "/models?api_key=secret",
+            "/models#secret",
+            "models",
+        ] {
+            assert_eq!(
+                derive_endpoint("https://gateway.example/v1", Some(override_path), "models")
+                    .unwrap_err(),
+                HttpError::InvalidEndpointOverride,
+                "override {override_path:?} must be rejected"
+            );
+        }
+        assert_eq!(
+            derive_endpoint(
+                "https://gateway.example/v1",
                 Some("/custom/models"),
                 "models"
             )

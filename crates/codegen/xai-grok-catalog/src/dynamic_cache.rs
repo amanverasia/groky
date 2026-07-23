@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::dynamic::{DynamicConfigError, DynamicProviderConfig, canonicalize_base_url};
 use crate::limits::{MAX_DISCOVERED_MODELS, MAX_ENDPOINT_BYTES, MAX_MODEL_NAME_BYTES};
 use crate::types::{ModelId, ProviderId};
 
@@ -41,10 +42,14 @@ pub enum DynamicCacheError {
     /// The file parsed but violates a validation bound.
     #[error("invalid dynamic cache: {0}")]
     Invalid(String),
+    /// A cache entry's identity URL violates the dynamic-provider URL policy.
+    #[error("invalid dynamic cache base URL: {0}")]
+    InvalidBaseUrl(#[from] DynamicConfigError),
 }
 
 /// A single discovered model: ID plus optional display name. Secret-free.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CachedModel {
     /// Validated model identifier.
     pub id: ModelId,
@@ -54,6 +59,7 @@ pub struct CachedModel {
 
 /// Last-known-good discovered models for one dynamic provider.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CachedProviderModels {
     /// Validated provider identifier.
     pub provider_id: ProviderId,
@@ -67,6 +73,7 @@ pub struct CachedProviderModels {
 
 /// The full on-disk dynamic cache document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DynamicCacheFile {
     /// Must equal [`DYNAMIC_CACHE_SCHEMA_VERSION`].
     pub schema_version: u32,
@@ -74,10 +81,45 @@ pub struct DynamicCacheFile {
     pub providers: IndexMap<ProviderId, CachedProviderModels>,
 }
 
+impl CachedProviderModels {
+    /// Safely constructs an entry using the provider's canonical identity URL.
+    pub fn new(
+        provider: &DynamicProviderConfig,
+        fetched_at_unix: i64,
+        models: Vec<CachedModel>,
+    ) -> Result<Self, DynamicCacheError> {
+        Ok(Self {
+            provider_id: provider.id.clone(),
+            base_url: provider.canonical_base_url()?,
+            fetched_at_unix,
+            models,
+        })
+    }
+
+    /// Whether this entry applies to a provider with the same ID and canonical endpoint identity.
+    pub fn applies_to(&self, provider: &DynamicProviderConfig) -> bool {
+        self.provider_id == provider.id
+            && canonicalize_base_url(&self.base_url, true).is_ok_and(|cached_base_url| {
+                provider
+                    .canonical_base_url()
+                    .is_ok_and(|base_url| cached_base_url == base_url)
+            })
+    }
+}
+
 impl DynamicCacheFile {
     /// Returns the cached entry for a provider, if any.
     pub fn provider(&self, id: &ProviderId) -> Option<&CachedProviderModels> {
         self.providers.get(id)
+    }
+
+    /// Returns the cached entry applicable to this provider's canonical identity.
+    pub fn applicable_provider(
+        &self,
+        provider: &DynamicProviderConfig,
+    ) -> Option<&CachedProviderModels> {
+        self.provider(&provider.id)
+            .filter(|entry| entry.applies_to(provider))
     }
 
     fn empty() -> Self {
@@ -106,6 +148,13 @@ impl DynamicCacheFile {
                     "base_url for provider {:?} exceeds {} bytes",
                     entry.provider_id.as_str(),
                     MAX_ENDPOINT_BYTES
+                )));
+            }
+            let canonical = canonicalize_base_url(&entry.base_url, true)?;
+            if canonical != entry.base_url {
+                return Err(DynamicCacheError::Invalid(format!(
+                    "base_url for provider {:?} is not canonical",
+                    entry.provider_id.as_str()
                 )));
             }
             if entry.models.len() > MAX_DISCOVERED_MODELS {
@@ -192,19 +241,26 @@ fn load_sync(path: &Path) -> Result<DynamicCacheFile, DynamicCacheError> {
             found: probe.schema_version,
         });
     }
-    let file: DynamicCacheFile = serde_json::from_slice(&bytes)
+    let mut file: DynamicCacheFile = serde_json::from_slice(&bytes)
         .map_err(|err| DynamicCacheError::InvalidJson(err.to_string()))?;
+    // Schema v1 originally stored lexical base URLs. Normalize valid legacy
+    // spellings in memory so they remain applicable, without changing a cache
+    // file merely because it was loaded.
+    for entry in file.providers.values_mut() {
+        entry.base_url = canonicalize_base_url(&entry.base_url, true)?;
+    }
     file.validate()?;
     Ok(file)
 }
 
 fn store_provider_sync(
     path: &Path,
-    provider: CachedProviderModels,
+    mut provider: CachedProviderModels,
 ) -> Result<(), DynamicCacheError> {
     // Refuse to clobber a corrupt or wrong-version file; only a missing
-    // file starts from empty.
+    // file starts from empty. Normalize public lexical input before storing.
     let mut file = load_sync(path)?;
+    provider.base_url = canonicalize_base_url(&provider.base_url, true)?;
     file.providers
         .insert(provider.provider_id.clone(), provider);
     file.validate()?;
@@ -355,15 +411,52 @@ mod tests {
     }
 
     fn sample_entry() -> CachedProviderModels {
-        CachedProviderModels {
-            provider_id: janus(),
-            base_url: "http://127.0.0.1:20128/v1".to_string(),
-            fetched_at_unix: 1_721_088_000,
-            models: vec![CachedModel {
+        let provider =
+            DynamicProviderConfig::new("janus", "Janus", "http://127.0.0.1:20128/v1").unwrap();
+        CachedProviderModels::new(
+            &provider,
+            1_721_088_000,
+            vec![CachedModel {
                 id: ModelId::new("openai/gpt-4o").unwrap(),
                 name: None,
             }],
-        }
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cache_entry_applies_only_to_matching_provider_id_and_canonical_origin() {
+        let provider =
+            DynamicProviderConfig::new("janus", "Janus", "https://EXAMPLE.com:443/v1/").unwrap();
+        let entry = CachedProviderModels::new(&provider, 1_721_088_000, Vec::new()).unwrap();
+        let equivalent =
+            DynamicProviderConfig::new("janus", "Janus", "https://example.com/v1").unwrap();
+        let other_id =
+            DynamicProviderConfig::new("other", "Other", "https://example.com/v1").unwrap();
+        let other_origin =
+            DynamicProviderConfig::new("janus", "Janus", "https://other.example/v1").unwrap();
+
+        assert!(entry.applies_to(&equivalent));
+        assert!(!entry.applies_to(&other_id));
+        assert!(!entry.applies_to(&other_origin));
+
+        let mut file = DynamicCacheFile::empty();
+        file.providers.insert(entry.provider_id.clone(), entry);
+        assert!(file.applicable_provider(&equivalent).is_some());
+        assert!(file.applicable_provider(&other_origin).is_none());
+    }
+
+    #[test]
+    fn cache_serde_rejects_secret_bearing_unknown_fields() {
+        let err = serde_json::from_str::<DynamicCacheFile>(
+            r#"{
+                "schema_version": 1,
+                "providers": {},
+                "api_key": "not-accepted"
+            }"#,
+        )
+        .expect_err("cache must reject secret-bearing unknown fields");
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 
     #[tokio::test]

@@ -83,7 +83,8 @@ pub fn janus_failure(failure: &JanusFailure) -> String {
 /// - `Status(401 | 403)` → [`JanusFailure::Authentication`].
 /// - `Timeout`, `Transport`, `TooManyRedirects`, and URL/policy errors
 ///   (`UnsupportedScheme`, `InsecureHttpDenied`, `MissingHost`,
-///   `CredentialsInUrl`, `InvalidUrl`) → [`JanusFailure::Connection`] with
+///   `CredentialsInUrl`, `InvalidEndpointOverride`, `InvalidUrl`) →
+///   [`JanusFailure::Connection`] with
 ///   the attempted URL; setup-time misconfiguration is presented as
 ///   connection guidance since the fix is the same (check the base URL).
 /// - Any other `Status` and `BodyTooLarge` → [`JanusFailure::InvalidResponse`]:
@@ -98,6 +99,7 @@ pub fn janus_failure_from_http(error: &HttpError, attempted_url: &str) -> JanusF
         | HttpError::InsecureHttpDenied
         | HttpError::MissingHost
         | HttpError::CredentialsInUrl
+        | HttpError::InvalidEndpointOverride
         | HttpError::InvalidUrl(_) => JanusFailure::Connection {
             url: attempted_url.to_string(),
         },
