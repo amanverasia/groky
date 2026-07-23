@@ -9,6 +9,7 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
+use xai_grok_catalog::DynamicProviderConfig;
 use xai_grok_sampler::{AuthScheme, SamplerConfig};
 use xai_grok_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
@@ -991,6 +992,12 @@ pub struct Config {
     /// Warnings from `[provider.*]` parsing.
     #[serde(skip)]
     pub provider_override_warnings: Vec<super::config_model_override_parse::ModelOverrideWarning>,
+    /// Strict user-declared dynamic providers from `[dynamic_provider.<id>]`.
+    ///
+    /// The provider ID is supplied exclusively by the table key. This field is
+    /// runtime-only so the special section never participates in config merges.
+    #[serde(skip)]
+    pub dynamic_providers: IndexMap<String, DynamicProviderConfig>,
     pub grok_com_config: GrokComConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortcuts: Option<toml::Value>,
@@ -1419,6 +1426,7 @@ impl Default for Config {
             model_override_warnings: Vec::new(),
             config_providers: IndexMap::new(),
             provider_override_warnings: Vec::new(),
+            dynamic_providers: IndexMap::new(),
             grok_com_config: GrokComConfig::default(),
             shortcuts: None,
             hints: None,
@@ -1555,6 +1563,8 @@ impl Config {
     }
     pub fn new_from_toml_cfg(raw_config: &toml::Value) -> Result<Self, String> {
         let raw_config = &Self::expand_auth_alias(raw_config);
+        let dynamic_providers =
+            super::config_dynamic_provider_parse::parse_dynamic_providers(raw_config)?;
         let super::config_model_override_parse::ParsedModelOverrides {
             models: config_models,
             warnings: model_override_warnings,
@@ -1568,15 +1578,17 @@ impl Config {
         if let toml::Value::Table(ref mut t) = base {
             t.remove("model");
             t.remove("provider");
+            t.remove("dynamic_provider");
         }
-        let mut raw_without_model_sections = raw_config.clone();
-        if let toml::Value::Table(ref mut t) = raw_without_model_sections {
+        let mut raw_without_special_sections = raw_config.clone();
+        if let toml::Value::Table(ref mut t) = raw_without_special_sections {
             t.remove("model");
             t.remove("provider");
+            t.remove("dynamic_provider");
         }
-        crate::config::deep_merge_toml(&mut base, &raw_without_model_sections);
+        crate::config::deep_merge_toml(&mut base, &raw_without_special_sections);
         let (mut config, user_unused) =
-            Self::deserialize_collecting_unrecognized(base, &raw_without_model_sections)?;
+            Self::deserialize_collecting_unrecognized(base, &raw_without_special_sections)?;
         if !user_unused.is_empty() {
             let keys = user_unused.join(", ");
             tracing::warn!(
@@ -1587,6 +1599,7 @@ impl Config {
         config.model_override_warnings = model_override_warnings;
         config.config_providers = config_providers;
         config.provider_override_warnings = provider_override_warnings;
+        config.dynamic_providers = dynamic_providers;
         if config.grok_com_config.oidc.is_none() {
             config.grok_com_config.oidc = OidcAuthConfig::from_env();
         }
