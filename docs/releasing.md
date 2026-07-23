@@ -2,7 +2,7 @@
 
 Releases are tag-driven. Pushing a tag matching `v*` runs
 [`.github/workflows/release.yml`](../.github/workflows/release.yml), which
-builds `groky` natively on four runners, packages tarballs with checksums,
+builds `groky` natively on two Linux runners, packages tarballs with checksums,
 and publishes a GitHub Release.
 
 ## Targets
@@ -28,14 +28,14 @@ Artifacts: `groky-<version>-<target>.tar.gz` (contains `groky`, `LICENSE`,
    fails the build if the tag's base version does not match what the binary
    reports. Commit and merge to `main`.
 2. **Dry run (optional):** trigger the `release` workflow manually
-   (`workflow_dispatch`) — it builds all four artifacts and uploads them to
-   the run without publishing anything.
+   (`workflow_dispatch`) — it builds both enabled Linux artifacts and uploads
+   them to the run without publishing anything.
 3. **Release candidate (recommended for significant releases):**
-   `git tag v0.1.0-rc.1 && git push origin v0.1.0-rc.1`. Pre-release tags
-   pass the smoke test as long as the base version matches (a `0.1.0` binary
-   is accepted for `v0.1.0-rc.1`). Verify the artifacts and the installer:
-   `GROKY_VERSION=v0.1.0-rc.1 bash install.sh`.
-4. **Final:** `git tag v0.1.0 && git push origin v0.1.0`.
+   `git tag v<release-version>-rc.1 && git push origin v<release-version>-rc.1`.
+   Pre-release tags pass the smoke test as long as the base version matches
+   (for example, a `0.1.1` binary is accepted for `v0.1.1-rc.1`). Verify the
+   artifacts and installer with `GROKY_VERSION=v<release-version>-rc.1 bash install.sh`.
+4. **Final:** `git tag v<release-version> && git push origin v<release-version>`.
 
 The GitHub Release is created with auto-generated notes; edit them afterwards
 if needed.

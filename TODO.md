@@ -1,48 +1,65 @@
-# TODO
+# Curated Groky backlog
 
-## Plan 3: Dynamic Providers and Janus — DONE
+Completed implementation history is preserved in `docs/superpowers/plans/`.
+This file lists only currently pending project work; broad imported source
+TODO/FIXME comments are not part of this backlog.
 
-Executed `docs/superpowers/plans/2026-07-16-dynamic-providers-and-janus.md`
-(12 tasks) on `feature/dynamic-providers`. Landed: bounded dynamic-provider
-config + discovery in `xai-grok-catalog` (URL security policy, manual
-redirects with cross-origin credential stripping, 2 MiB / 2000-model bounds),
-secret-free last-known-good dynamic model cache, Janus preset + setup flow
-(`/providers` → `x.ai/providers/setup_janus`, persisted in secret-free
-`$GROK_HOME/dynamic_providers.json`), sampler credential redaction, refresh
-orchestration (24h staleness gate, forced refresh, in-flight coalescing),
-end-to-end Janus tests, and `docs/configuration/providers.md`.
+## Correctness and secret hardening
 
-## Plan 3 follow-ups (not landed)
+- [ ] Fix `TargetFilterLayer` so optional sampling/instrumentation layers do not
+      globally suppress unrelated tracing events. See `ISSUES.md`.
+- [ ] Remove generic serialization from live `SamplerConfig` and provide only an
+      explicit secret-free diagnostics representation if needed. See
+      `ISSUES.md`.
 
-- Generic `[provider.<id>]` TOML-configured dynamic providers are not wired
-  into the shell's config loading: the catalog crate validates/deserializes
-  `DynamicProviderConfig` from TOML and the shell exposes
-  `ProviderCatalogAdapter::configure_dynamic`, but nothing registers dynamic
-  providers declared in `config.toml`. Janus (via `/providers`) is the only
-  end-to-end dynamic provider today. See "Known limitations" in
-  `docs/configuration/providers.md`.
-- Providers modal: the `JanusResult` screen relies on Enter/Esc but the modal
-  footer shortcut labels do not describe them.
-- Dynamic model cache is keyed by provider id only; after a base-URL change,
-  stale models from the old URL are served until the next successful refresh.
-- A dynamic provider reusing a catalog provider id replaces that catalog
-  entry, dropping its env-var credential resolution.
-- Inference-time env-var fallback (`catalog_provider_env_credential`) uses the
-  embedded catalog only; stamp `entry.env_key` from the post-override provider
-  during composition so runtime-refreshed providers resolve correctly.
-- CI catalog check fetches live models.dev (nondeterministic); consider
-  checking against a committed raw input instead.
-- `ProviderCatalogAdapter` doc claims "holds no secrets" while `session_keys`
-  holds plaintext; wire or remove `set_session_key` (currently no production
-  caller).
-- Pre-existing broken lib test targets (`xai-grok-shell` ~31 errors,
-  `xai-grok-pager` ~169 errors) in the published snapshot: repairing them
-  would let the deferred in-crate unit tests run.
-- Pre-existing bug: enabling `GROK_LOG_SAMPLING` suppresses all other tracing
-  process-wide (`TargetFilterLayer::enabled` global veto,
-  xai-grok-telemetry/src/instrumentation.rs); use per-layer `Filtered`.
+## Dynamic providers and Janus
 
-## Other pending decisions
+- [ ] Add generic `[dynamic_provider.<id>]` TOML configuration without changing
+      existing `[provider.<id>]` catalog-override semantics.
+- [ ] Reject dynamic IDs that collide with bundled providers or reserved
+      `xai`/`janus` identities.
+- [ ] Carry configured environment-variable names through provider composition
+      and resolve credentials from the effective post-override provider at
+      inference time; never fall back to xAI/session credentials.
+- [ ] Scope discovered-model cache reuse to provider ID plus canonical validated
+      base URL so endpoint changes cannot publish stale models from an old
+      origin.
+- [ ] Add atomic startup/reload registration: invalid reload retains the
+      last-known-good provider set and emits secret-free diagnostics.
+- [ ] Give each Janus setup/result modal state accurate Enter/Esc footer labels.
+- [ ] Remove unused plaintext `ProviderCatalogAdapter::session_keys` and
+      `set_session_key`; supported credentials remain stored provider keys and
+      configured environment references.
 
-- Merge `feature/remove-telemetry` and `feature/provider-catalog` into `main`.
-- Wire `bin/check-no-network-telemetry.sh` into CI once CI exists for the fork.
+## Selective security adaptations
+
+Do not merge upstream sync commits wholesale. Port and review these as focused
+local changes:
+
+- [ ] Default-deny non-public `web_fetch` destinations, with explicit literal
+      loopback opt-in and redirect/DNS-rebinding protections.
+- [ ] Validate plugin Git URL/ref/SHA operands and terminate Git options before
+      user/config-controlled values.
+- [ ] Default project LSP trust to false and propagate only verified folder
+      trust into workspace-server launch.
+- [ ] Harden permission auto-approval against execution-capable `rg --pre`,
+      `env -S`, dangerous `kubectl`/`ps`, and recursive command construction.
+- [ ] Enforce a reviewed cross-platform sensitive-file policy for direct edits
+      and shell writes.
+- [ ] Scope provider/session credentials to their exact approved endpoint.
+- [ ] Share owner-only secure-file writes across provider/auth/MCP/crash
+      sensitive artifacts.
+
+## External release and product gates
+
+- [ ] Manual clean-home no-credential/no-network startup smoke under syscall
+      tracing.
+- [ ] Create/push `v0.1.1` and verify published Linux artifacts/checksums only
+      after explicit release authorization.
+- [ ] Verify the published aarch64 artifact on real ARMv8/Ampere hardware with
+      no SIGILL.
+- [ ] Deploy groky.dev documentation/installer redirect when hosting and DNS are
+      available.
+- [ ] Diagnose and restore macOS release artifacts.
+- [ ] Decide and validate promoted Windows release support (currently
+      best-effort/untested).
