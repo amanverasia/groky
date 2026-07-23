@@ -18,18 +18,18 @@ TODO/FIXME comments are not part of this backlog.
       existing `[provider.<id>]` catalog-override semantics.
 - [ ] Reject dynamic IDs that collide with bundled providers or reserved
       `xai`/`janus` identities.
-- [ ] Carry configured environment-variable names through provider composition
+- [x] Carry configured environment-variable names through provider composition
       and resolve credentials from the effective post-override provider at
       inference time; never fall back to xAI/session credentials.
-- [ ] Scope discovered-model cache reuse to provider ID plus canonical validated
+- [x] Scope discovered-model cache reuse to provider ID plus canonical validated
       base URL so endpoint changes cannot publish stale models from an old
       origin.
-- [ ] Add atomic startup/reload registration: invalid reload retains the
+- [x] Add atomic startup/reload registration: invalid reload retains the
       last-known-good provider set and emits secret-free diagnostics.
-- [ ] Give each Janus setup/result modal state accurate Enter/Esc footer labels.
-- [ ] Remove unused plaintext `ProviderCatalogAdapter::session_keys` and
-      `set_session_key`; supported credentials remain stored provider keys and
-      configured environment references.
+- [x] Give each Janus setup/result modal state accurate Enter/Esc footer labels.
+- [x] Remove unused process-local plaintext provider credential retention;
+      supported credentials remain stored provider keys and configured
+      environment references.
 
 ## Selective security adaptations
 

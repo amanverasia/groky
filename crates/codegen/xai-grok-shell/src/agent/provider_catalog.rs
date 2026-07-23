@@ -205,7 +205,7 @@ pub fn model_entry_from_catalog(
         provider_id: Some(provider.id.clone()),
         // `unauthenticated` means a key is *optional*, not forbidden (the
         // same contract discovery/health follow): the ProviderApiKey seam
-        // resolves session > stored > environment and yields no header when
+        // resolves stored > environment and yields no header when
         // nothing exists, so keyless providers still work while a stored
         // key (e.g. Janus setup) authenticates inference too.
         credential_policy: CredentialPolicy::ProviderApiKey,
@@ -294,12 +294,12 @@ pub fn provider_model_entries(
 }
 
 /// Shell-side handle to the catalog manager plus call-time credential
-/// resolution. Holds no secrets: session keys live only for lookup and the
-/// resolved secret is returned to the caller, never stored in snapshots.
+/// resolution. Holds no provider credentials: stored keys remain in auth.json,
+/// environment values are read only when a request resolves credentials, and
+/// snapshots contain names/availability metadata only.
 pub struct ProviderCatalogAdapter {
     manager: xai_grok_catalog::CatalogManager,
     grok_home: PathBuf,
-    session_keys: parking_lot::RwLock<std::collections::HashMap<String, String>>,
     /// Coalesces background catalog refreshes: only one may be in flight.
     refresh_in_flight: std::sync::atomic::AtomicBool,
     /// Registered dynamic providers and their published model layers.
@@ -361,7 +361,7 @@ pub struct DynamicReplacementRollback {
 
 /// The provider entry a dynamic config contributes to the catalog layer.
 /// Secret-free: dynamic providers carry only ordered environment-variable
-/// names; credential values come from session/stored/environment scopes.
+/// names; credential values come from stored/environment scopes.
 fn dynamic_catalog_provider(
     config: &DynamicProviderConfig,
     models: Vec<CatalogModel>,
@@ -393,7 +393,6 @@ impl ProviderCatalogAdapter {
         let adapter = Self {
             manager,
             grok_home,
-            session_keys: parking_lot::RwLock::new(std::collections::HashMap::new()),
             refresh_in_flight: std::sync::atomic::AtomicBool::new(false),
             dynamic: parking_lot::Mutex::new(DynamicState::default()),
             composed: parking_lot::Mutex::new(None),
@@ -511,17 +510,10 @@ impl ProviderCatalogAdapter {
         self.manager.refresh_if_stale().await
     }
 
-    /// Records a session-scoped provider API key (highest precedence).
-    pub fn set_session_key(&self, provider_id: &ProviderId, api_key: String) {
-        self.session_keys
-            .write()
-            .insert(provider_id.as_str().to_owned(), api_key);
-    }
-
     /// Resolves the credential for `provider_id` at call time with precedence
-    /// session > stored > environment. Model-inline credentials are resolved
-    /// by the per-entry credential seam, not here. The returned secret is
-    /// never retained by the adapter.
+    /// stored > environment. Model-inline credentials are resolved by the
+    /// per-entry credential seam, not here. The returned secret is never
+    /// retained by the adapter.
     pub fn credential_for(&self, provider_id: &ProviderId) -> Option<SecretString> {
         let snapshot = self.snapshot();
         let provider = snapshot.catalog().provider(provider_id)?;
@@ -826,7 +818,7 @@ impl ProviderCatalogAdapter {
     /// Performs one bounded model discovery for a registered dynamic
     /// provider and publishes the result into the snapshot layer.
     ///
-    /// The credential is resolved at request time (session > stored) and
+    /// The credential is resolved at request time (stored > environment) and
     /// sent whenever one exists — `unauthenticated` means a key is
     /// *optional*, not forbidden, so a stored key still authenticates
     /// discovery. On success the discovered list is persisted to the
@@ -1298,8 +1290,8 @@ impl ProviderCatalogAdapter {
         Ok(result)
     }
 
-    /// Resolves the outbound credential for a dynamic provider (session >
-    /// stored). A credential is sent whenever one exists, even for
+    /// Resolves the outbound credential for a dynamic provider (stored >
+    /// environment). A credential is sent whenever one exists, even for
     /// `unauthenticated` providers, where a key is optional.
     fn dynamic_credential(&self, config: &DynamicProviderConfig) -> Option<SecretString> {
         resolve_credential(self.credential_sources(&dynamic_catalog_provider(config, Vec::new())))
@@ -1414,18 +1406,12 @@ impl ProviderCatalogAdapter {
     }
 
     fn credential_sources(&self, provider: &CatalogProvider) -> CredentialSources {
-        let session = self
-            .session_keys
-            .read()
-            .get(provider.id.as_str())
-            .map(SecretString::new);
         let stored = crate::auth::read_provider_api_key(&self.grok_home, provider.id.as_str())
             .map(SecretString::new);
         let environment = EnvKeys::new(provider.env_vars.iter().cloned())
             .resolve_value()
             .map(SecretString::new);
         CredentialSources {
-            session,
             stored,
             environment,
             model: None,

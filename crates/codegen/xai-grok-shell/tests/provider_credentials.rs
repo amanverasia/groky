@@ -42,7 +42,6 @@ fn xai_legacy_resolution_is_unchanged() {
         Some("xai-oauth-token"),
         || Some("xai-global-key".to_string()),
         |_| None,
-        |_| None,
     );
     assert_eq!(resolved.api_key.as_deref(), Some("xai-oauth-token"));
     assert_eq!(resolved.auth_type, xai_chat_state::AuthType::SessionToken);
@@ -55,7 +54,6 @@ fn xai_legacy_falls_back_to_global_key_without_session() {
         &entry,
         None,
         || Some("xai-global-key".to_string()),
-        |_| None,
         |_| None,
     );
     assert_eq!(resolved.api_key.as_deref(), Some("xai-global-key"));
@@ -76,7 +74,6 @@ fn xai_session_and_global_key_never_leak_to_openai() {
         Some("xai-oauth-token"),
         || Some("xai-global-key".to_string()),
         |_| None,
-        |_| None,
     );
     assert!(resolved.api_key.is_none());
     assert_eq!(resolved.base_url, "https://api.openai.com/v1");
@@ -89,34 +86,22 @@ fn provider_credential_precedence_matches_design() {
     let mut entry = provider_entry();
     entry.api_key = Some("model-key".to_string());
 
-    // Session provider key wins over everything.
-    let resolved = resolve_credentials_with(
-        &entry,
-        Some("xai-oauth-token"),
-        || Some("xai-global-key".to_string()),
-        |provider| (provider == "openai").then(|| "session-provider-key".to_string()),
-        |provider| (provider == "openai").then(|| "stored-key".to_string()),
-    );
-    assert_eq!(resolved.api_key.as_deref(), Some("session-provider-key"));
-    assert_eq!(resolved.auth_type, xai_chat_state::AuthType::ApiKey);
-
-    // Stored key beats catalog env vars and model credentials.
+    // Stored key beats xAI credentials, catalog env vars, and model credentials.
     let resolved = resolve_credentials_with(
         &entry,
         None,
         || None,
-        |_| None,
         |provider| (provider == "openai").then(|| "stored-key".to_string()),
     );
     assert_eq!(resolved.api_key.as_deref(), Some("stored-key"));
 
     // Catalog env var beats model credentials.
-    let resolved = resolve_credentials_with(&entry, None, || None, |_| None, |_| None);
+    let resolved = resolve_credentials_with(&entry, None, || None, |_| None);
     assert_eq!(resolved.api_key.as_deref(), Some("env-key"));
 
     // Model credentials are the last resort.
     unsafe { std::env::remove_var("OPENAI_API_KEY") };
-    let resolved = resolve_credentials_with(&entry, None, || None, |_| None, |_| None);
+    let resolved = resolve_credentials_with(&entry, None, || None, |_| None);
     assert_eq!(resolved.api_key.as_deref(), Some("model-key"));
 }
 
@@ -126,6 +111,7 @@ fn explicit_model_policy_uses_model_credentials_only() {
     unsafe { std::env::set_var("OPENAI_API_KEY", "env-key") };
     let mut entry = provider_entry();
     entry.credential_policy = CredentialPolicy::ExplicitModel;
+    entry.env_key = None;
 
     // Without model credentials nothing is attached, even with xAI keys,
     // provider keys, and catalog env vars available.
@@ -133,13 +119,12 @@ fn explicit_model_policy_uses_model_credentials_only() {
         &entry,
         Some("xai-oauth-token"),
         || Some("xai-global-key".to_string()),
-        |_| Some("session-provider-key".to_string()),
         |_| Some("stored-key".to_string()),
     );
     assert!(resolved.api_key.is_none());
 
     entry.api_key = Some("model-key".to_string());
-    let resolved = resolve_credentials_with(&entry, None, || None, |_| None, |_| None);
+    let resolved = resolve_credentials_with(&entry, None, || None, |_| None);
     assert_eq!(resolved.api_key.as_deref(), Some("model-key"));
     unsafe { std::env::remove_var("OPENAI_API_KEY") };
 }
@@ -153,7 +138,6 @@ fn none_policy_never_attaches_a_key() {
         &entry,
         Some("xai-oauth-token"),
         || Some("xai-global-key".to_string()),
-        |_| Some("session-provider-key".to_string()),
         |_| Some("stored-key".to_string()),
     );
     assert!(resolved.api_key.is_none());

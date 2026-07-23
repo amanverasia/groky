@@ -121,7 +121,7 @@ fn provider_env_key_override_reaches_credential_fallback() {
     let catalog = sample_catalog();
     let models = provider_model_entries(&catalog, &cfg, |_| Some(CredentialOrigin::Environment));
     let entry = models.get("openai/gpt-5").expect("entry present");
-    let resolved = resolve_credentials_with(entry, None, || None, |_| None, |_| None);
+    let resolved = resolve_credentials_with(entry, None, || None, |_| None);
     assert_eq!(resolved.api_key.as_deref(), Some("custom-env-key"));
     unsafe { std::env::remove_var("MY_OPENAI_KEY") };
 }
@@ -176,9 +176,10 @@ fn provider_refresh_preserves_a_still_valid_current_selection() {
     let auth = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
     let mgr = ModelsManager::from_config(&cfg, None, auth).unwrap();
 
-    let adapter = ProviderCatalogAdapter::from_grok_home(tmp.path().to_path_buf());
-    adapter.set_session_key(&ProviderId::new("openai").unwrap(), "sk-test".to_string());
-    let adapter = Arc::new(adapter);
+    xai_grok_shell::auth::store_provider_api_key(tmp.path(), "openai", "sk-test").unwrap();
+    let adapter = Arc::new(ProviderCatalogAdapter::from_grok_home(
+        tmp.path().to_path_buf(),
+    ));
 
     mgr.set_provider_catalog(adapter.clone());
     let models = mgr.models();
