@@ -45,7 +45,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             handle_reload_project_mcp_servers(agent, args).await
         }
         "x.ai/internal/reload_skills" => handle_reload_skills(agent),
-        "x.ai/internal/reload_models" => handle_reload_models(agent),
+        "x.ai/internal/reload_models" => handle_reload_models(agent).await,
         "x.ai/internal/reload_models_cache" => handle_reload_models_cache(agent),
         "x.ai/internal/auth_cleared" => handle_auth_cleared(agent),
         "x.ai/plugins/reload" => handle_plugins_reload(agent).await,
@@ -550,42 +550,95 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 /// `new_with_models()` for user TOML config entries, and swaps the model list
 /// in-place. Prefetched (API) and default models are NOT re-fetched -- only
 /// BYOK entries from config are updated.
-fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
+async fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let disk_config = crate::config::load_effective_config()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
     let toml_config = crate::agent::config::Config::new_from_toml_cfg(&disk_config)
         .map_err(|e| acp::Error::internal_error().data(e))?;
 
-    // Merge TOML-derived model fields into the agent's in-memory config so
-    // runtime-only fields (#[serde(skip)]: remote_settings, endpoints, CLI
-    // flags) are preserved. Only model-related TOML fields are refreshed.
-    {
-        let agent_config = agent.cfg.borrow();
-        let overrides = crate::config::ModelOverrideConfig::resolve(
-            agent_config.web_search_model_override.as_deref(),
-            agent_config.session_summary_model_override.as_deref(),
-            &disk_config,
-            agent_config.remote_settings.as_ref(),
-        );
-        drop(agent_config);
-        let mut agent_config = agent.cfg.borrow_mut();
-        agent_config.models = toml_config.models.clone();
-        agent_config.config_models = toml_config.config_models.clone();
-        agent_config.web_search_model = overrides.web_search;
-        agent_config.session_summary_model = overrides.session_summary;
-        agent_config.image_description_model = overrides.image_description;
-        agent_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
-    }
+    // Build a candidate without touching either live config holder. Runtime-only
+    // fields (#[serde(skip)]: remote_settings, endpoints, CLI flags) come from
+    // the current agent config; all reloadable model/provider fields come from disk.
+    let mut merged_config = agent.cfg.borrow().clone();
+    let overrides = crate::config::ModelOverrideConfig::resolve(
+        merged_config.web_search_model_override.as_deref(),
+        merged_config.session_summary_model_override.as_deref(),
+        &disk_config,
+        merged_config.remote_settings.as_ref(),
+    );
+    merged_config.models = toml_config.models.clone();
+    merged_config.config_models = toml_config.config_models.clone();
+    merged_config.config_providers = toml_config.config_providers.clone();
+    merged_config.dynamic_providers = toml_config.dynamic_providers.clone();
+    merged_config.web_search_model = overrides.web_search;
+    merged_config.session_summary_model = overrides.session_summary;
+    merged_config.image_description_model = overrides.image_description;
+    merged_config.prompt_suggest_model_pin = overrides.prompt_suggestion;
     // Recompute the campaign overlay + `pre_campaign_default` (the catalog-miss
     // fallback) so reload matches spawn; `new_from_toml_cfg` reset it to None.
+    crate::util::config::sync_campaign_fields(&mut merged_config);
+    let adapter = agent
+        .models_manager
+        .provider_catalog()
+        .ok_or_else(|| acp::Error::internal_error().data("provider catalog unavailable"))?;
+    let _dynamic_transaction = adapter.dynamic_transaction_guard().await;
+    let prepared = adapter
+        .prepare_dynamic_replacement(merged_config.dynamic_providers.values().cloned())
+        .map_err(|_| {
+            acp::Error::invalid_request().data("invalid dynamic provider configuration")
+        })?;
+    let _model_transaction = agent.models_manager.config_transaction_guard();
+    let preview = adapter.preview_dynamic_entries(&prepared, &merged_config);
+    agent
+        .models_manager
+        .validate_config_with_provider_entries(&merged_config, preview)
+        .map_err(|e| acp::Error::invalid_request().data(e))?;
+    let rollback = adapter
+        .commit_dynamic_replacement_with_rollback(prepared)
+        .map_err(|_| {
+            acp::Error::invalid_request()
+                .data("dynamic provider configuration changed during reload")
+        })?;
+    if let Err(err) = agent
+        .models_manager
+        .apply_config_in_transaction(merged_config.clone())
     {
-        let mut agent_config = agent.cfg.borrow_mut();
-        crate::util::config::sync_campaign_fields(&mut agent_config);
+        adapter.rollback_dynamic_replacement(rollback);
+        agent
+            .models_manager
+            .rebuild_provider_models_in_transaction();
+        tracing::error!(error = %err, "dynamic reload failed after provider commit; rolled back");
+        return Err(acp::Error::internal_error()
+            .data("model catalog changed during dynamic provider reload; retry the reload"));
     }
-    let merged_config = agent.cfg.borrow().clone();
-
-    agent.models_manager.apply_config(merged_config);
+    *agent.cfg.borrow_mut() = merged_config;
+    adapter.hydrate_dynamic_from_cache();
+    agent
+        .models_manager
+        .rebuild_provider_models_in_transaction();
+    if adapter.has_discovery_enabled_dynamic() {
+        let models_manager = agent.models_manager.clone();
+        adapter.refresh_stale_dynamic_in_background(move |event| match event {
+            crate::agent::provider_catalog::ProviderCatalogEvent::DynamicRefreshComplete {
+                ..
+            } => models_manager.rebuild_provider_models(),
+            crate::agent::provider_catalog::ProviderCatalogEvent::DynamicRefreshFailed {
+                provider_id,
+                message,
+            } => tracing::warn!(
+                provider = provider_id.as_str(),
+                %message,
+                "dynamic provider reload refresh failed"
+            ),
+            crate::agent::provider_catalog::ProviderCatalogEvent::DynamicRefreshStarted {
+                ..
+            }
+            | crate::agent::provider_catalog::ProviderCatalogEvent::JanusHealthComplete {
+                ..
+            } => {}
+        });
+    }
 
     let count = agent.models_manager.models().len();
     tracing::info!(count, "model list reloaded from config.toml");

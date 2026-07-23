@@ -60,8 +60,8 @@ pub enum ConfigUpdate {
     /// Updated `[compat]` vendor-compatibility config. Applied on the
     /// next agent (re)build, which re-resolves `compat_resolved`.
     Compat(Box<xai_grok_tools::types::compat::CompatConfigToml>),
-    /// The `[model.*]` entries in config.toml changed. Agent should re-resolve
-    /// its model list (BYOK models added/removed, default or surprise changed).
+    /// A model/provider section changed. Agent reloads model overrides, static
+    /// provider overrides, and generic dynamic provider registrations together.
     ModelsChanged,
     /// `~/.grok/models_cache.json` was rewritten on disk (possibly by another
     /// via `ModelsManager::reload_from_disk_cache`, which content-dedupes
@@ -315,19 +315,22 @@ impl ConfigReloader {
     }
 
     fn reload_config(&mut self) -> anyhow::Result<()> {
+        let new_global = match crate::config::load_from_disk() {
+            Ok(value) => value,
+            Err(err) => {
+                error!(error = %err, "failed to parse config.toml, keeping last-known-good");
+                return Ok(());
+            }
+        };
+        self.apply_global_config(new_global)
+    }
+
+    fn apply_global_config(&mut self, new_global: toml::Value) -> anyhow::Result<()> {
         // `has_project_config` parameter dropped —
         // project-scoped reloads are dispatched via
         // `ProjectMcpServersChanged { cwd }` in the caller's
         // `collect_project_cwds` fan-out, so this function only
         // needs to diff the global toml.
-        let new_global = match crate::config::load_from_disk() {
-            Ok(v) => v,
-            Err(e) => {
-                error!(error = %e, "failed to parse config.toml, keeping last-known-good");
-                return Ok(());
-            }
-        };
-
         // MCP servers — compare [mcp_servers] table in the **global**
         // config (`~/.grok/config.toml`) via toml::Value. Project-
         // scoped changes (`<cwd>/.grok/config.toml`,
@@ -381,14 +384,14 @@ impl ConfigReloader {
                 .send(ConfigUpdate::Compat(Box::new(new_compat)));
         }
 
-        // Models — compare [model] (BYOK entries) and [models] (default, surprise) tables.
-        // Use toml::Value comparison (covers all fields including nested model entries).
-        let old_model_table = self.last_global_config.get("model");
-        let new_model_table = new_global.get("model");
-        let old_models_table = self.last_global_config.get("models");
-        let new_models_table = new_global.get("models");
-        if old_model_table != new_model_table || old_models_table != new_models_table {
-            info!("model config change detected");
+        // Models/providers — one serialized reload handles the complete model
+        // composition boundary, including dynamic registration changes.
+        let watched_sections = ["model", "models", "provider", "dynamic_provider"];
+        if watched_sections
+            .iter()
+            .any(|section| self.last_global_config.get(*section) != new_global.get(*section))
+        {
+            info!("model/provider config change detected");
             let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);
         }
 
@@ -537,6 +540,38 @@ mod tests {
     use super::*;
     use crate::auth::GrokAuth;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn reloader_detects_static_and_dynamic_provider_section_changes() {
+        for section in ["provider", "dynamic_provider"] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let initial: toml::Value = toml::from_str("").unwrap();
+            let mut reloader = ConfigReloader::new(
+                tmp.path().to_path_buf(),
+                0,
+                initial,
+                "https://test.example.com".to_owned(),
+                None,
+                tx,
+                false,
+                false,
+            );
+            let changed: toml::Value = if section == "provider" {
+                toml::from_str("[provider.openai]\nname = 'Changed'\n").unwrap()
+            } else {
+                toml::from_str(
+                    "[dynamic_provider.local]\nname = 'Local'\nbase_url = 'https://example.com/v1'\n",
+                )
+                .unwrap()
+            };
+            reloader.apply_global_config(changed).unwrap();
+            assert!(
+                matches!(rx.try_recv(), Ok(ConfigUpdate::ModelsChanged)),
+                "{section} changes must trigger the serialized model/provider reload"
+            );
+        }
+    }
 
     fn make_auth(key: &str) -> GrokAuth {
         GrokAuth {

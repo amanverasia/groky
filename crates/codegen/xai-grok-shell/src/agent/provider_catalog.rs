@@ -316,6 +316,8 @@ pub struct ProviderCatalogAdapter {
     dynamic_semaphore: Arc<tokio::sync::Semaphore>,
     /// Providers with a background refresh in flight (coalescing).
     dynamic_in_flight: Arc<parking_lot::Mutex<HashSet<String>>>,
+    /// Serializes dynamic reload commits with refresh cache/publication updates.
+    dynamic_transaction: Arc<tokio::sync::Mutex<()>>,
     /// Policy-enforcing discovery client (manual redirects, no auto-auth).
     discovery_client: reqwest::Client,
 }
@@ -343,6 +345,18 @@ struct ComposedSnapshot {
 enum GenericDynamicMutation {
     Upsert,
     Replace,
+}
+
+/// Validated, non-live replacement payload for atomic config reloads.
+pub struct PreparedDynamicReplacement {
+    base: Arc<CatalogSnapshot>,
+    providers: Vec<(String, DynamicProviderConfig, Vec<CatalogModel>)>,
+}
+
+/// Opaque rollback state returned by a transactional replacement commit.
+pub struct DynamicReplacementRollback {
+    configs: IndexMap<String, DynamicProviderConfig>,
+    models: IndexMap<String, Vec<CatalogModel>>,
 }
 
 /// The provider entry a dynamic config contributes to the catalog layer.
@@ -388,6 +402,7 @@ impl ProviderCatalogAdapter {
                 MAX_CONCURRENT_DYNAMIC_REFRESHES,
             )),
             dynamic_in_flight: Arc::new(parking_lot::Mutex::new(HashSet::new())),
+            dynamic_transaction: Arc::new(tokio::sync::Mutex::new(())),
             discovery_client: xai_grok_catalog::http::client(),
         };
         adapter.register_persisted_dynamic_providers();
@@ -582,36 +597,165 @@ impl ProviderCatalogAdapter {
         configs: impl IntoIterator<Item = DynamicProviderConfig>,
         mutation: GenericDynamicMutation,
     ) -> Result<(), ProviderAdapterError> {
+        if matches!(mutation, GenericDynamicMutation::Replace) {
+            return self.commit_dynamic_replacement(self.prepare_dynamic_replacement(configs)?);
+        }
         let configs: Vec<_> = configs.into_iter().collect();
-        let mut seen = HashSet::with_capacity(configs.len());
-        let mut prepared = Vec::with_capacity(configs.len());
+        let mut dynamic = self.dynamic.lock();
+        let mut combined: Vec<_> = dynamic
+            .configs
+            .iter()
+            .filter(|(id, _)| !dynamic.managed_ids.contains(*id))
+            .map(|(_, config)| config.clone())
+            .collect();
+        drop(dynamic);
+        for config in configs {
+            if let Some(existing) = combined
+                .iter_mut()
+                .find(|existing| existing.id == config.id)
+            {
+                *existing = config;
+            } else {
+                combined.push(config);
+            }
+        }
+        self.commit_dynamic_replacement(self.prepare_dynamic_replacement(combined)?)
+    }
+
+    /// Validate and prepare a complete generic replacement without mutating live state.
+    pub fn prepare_dynamic_replacement(
+        &self,
+        configs: impl IntoIterator<Item = DynamicProviderConfig>,
+    ) -> Result<PreparedDynamicReplacement, ProviderAdapterError> {
+        let base = self.manager.snapshot();
+        let mut seen = HashSet::new();
+        let mut providers = Vec::new();
         for config in configs {
             let id = config.id.as_str().to_owned();
             if !seen.insert(id.clone()) {
                 return Err(ProviderAdapterError::DuplicateDynamicProviderId(id));
             }
-            self.validate_generic_id(&id)?;
-            let statics = self.validate_and_static_models(&config)?;
-            prepared.push((id, config, statics));
+            if id == "xai" || id == JANUS_PROVIDER_ID {
+                return Err(ProviderAdapterError::ReservedProviderId(id));
+            }
+            if base.catalog().provider_str(&id).is_some() {
+                return Err(ProviderAdapterError::CatalogProviderIdCollision(id));
+            }
+            let statics = self.validate_and_static_models_against(&config, &base)?;
+            providers.push((id, config, statics));
         }
+        Ok(PreparedDynamicReplacement { base, providers })
+    }
 
+    /// Preview provider model entries for a prepared replacement without
+    /// mutating live dynamic state.
+    pub fn preview_dynamic_entries(
+        &self,
+        prepared: &PreparedDynamicReplacement,
+        config: &Config,
+    ) -> IndexMap<String, ModelEntry> {
+        let mut snapshot = Arc::clone(&prepared.base);
+        // Preserve managed providers (currently Janus) in the prospective view.
+        let managed_layers: Vec<_> = {
+            let dynamic = self.dynamic.lock();
+            dynamic
+                .managed_ids
+                .iter()
+                .filter_map(|id| {
+                    let cfg = dynamic.configs.get(id)?;
+                    let models = dynamic.models.get(id)?;
+                    Some(dynamic_catalog_provider(cfg, models.clone()))
+                })
+                .collect()
+        };
+        for provider in managed_layers {
+            if snapshot
+                .catalog()
+                .provider_str(provider.id.as_str())
+                .is_none()
+            {
+                snapshot = snapshot.with_dynamic_models(provider);
+            }
+        }
+        for (_, dynamic_config, statics) in &prepared.providers {
+            snapshot = snapshot
+                .with_dynamic_models(dynamic_catalog_provider(dynamic_config, statics.clone()));
+        }
+        provider_model_entries(snapshot.catalog(), config, |provider| {
+            self.credential_origin(provider)
+        })
+    }
+
+    /// Acquire the transaction gate shared by config reload and refresh publication.
+    pub async fn dynamic_transaction_guard(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.dynamic_transaction).lock_owned().await
+    }
+
+    /// Commit a prepared replacement, revalidating against the current base catalog.
+    pub fn commit_dynamic_replacement(
+        &self,
+        prepared: PreparedDynamicReplacement,
+    ) -> Result<(), ProviderAdapterError> {
+        self.commit_dynamic_replacement_with_rollback(prepared)
+            .map(|_| ())
+    }
+
+    /// Commit and return the previous generic state so a coordinated caller can
+    /// restore it if a later model-config publication fails.
+    pub fn commit_dynamic_replacement_with_rollback(
+        &self,
+        mut prepared: PreparedDynamicReplacement,
+    ) -> Result<DynamicReplacementRollback, ProviderAdapterError> {
+        let current_base = self.manager.snapshot();
+        if !Arc::ptr_eq(&current_base, &prepared.base) {
+            for (id, config, statics) in &mut prepared.providers {
+                if current_base.catalog().provider_str(id).is_some() {
+                    return Err(ProviderAdapterError::CatalogProviderIdCollision(id.clone()));
+                }
+                *statics = self.validate_and_static_models_against(config, &current_base)?;
+            }
+            prepared.base = current_base;
+        }
         let mut dynamic = self.dynamic.lock();
-        for (id, _, _) in &prepared {
+        for (id, _, _) in &prepared.providers {
             if dynamic.managed_ids.contains(id) {
                 return Err(ProviderAdapterError::ReservedProviderId(id.clone()));
             }
         }
-        if matches!(mutation, GenericDynamicMutation::Replace) {
-            let managed_ids = dynamic.managed_ids.clone();
-            dynamic.configs.retain(|id, _| managed_ids.contains(id));
-            dynamic.models.retain(|id, _| managed_ids.contains(id));
-        }
-        for (id, config, statics) in prepared {
+        let managed_ids = dynamic.managed_ids.clone();
+        let rollback = DynamicReplacementRollback {
+            configs: dynamic
+                .configs
+                .iter()
+                .filter(|(id, _)| !managed_ids.contains(*id))
+                .map(|(id, config)| (id.clone(), config.clone()))
+                .collect(),
+            models: dynamic
+                .models
+                .iter()
+                .filter(|(id, _)| !managed_ids.contains(*id))
+                .map(|(id, models)| (id.clone(), models.clone()))
+                .collect(),
+        };
+        dynamic.configs.retain(|id, _| managed_ids.contains(id));
+        dynamic.models.retain(|id, _| managed_ids.contains(id));
+        for (id, config, statics) in prepared.providers {
             dynamic.configs.insert(id.clone(), config);
             dynamic.models.insert(id, statics);
         }
         dynamic.generation += 1;
-        Ok(())
+        Ok(rollback)
+    }
+
+    /// Restore generic dynamic state returned by a failed coordinated commit.
+    pub fn rollback_dynamic_replacement(&self, rollback: DynamicReplacementRollback) {
+        let mut dynamic = self.dynamic.lock();
+        let managed_ids = dynamic.managed_ids.clone();
+        dynamic.configs.retain(|id, _| managed_ids.contains(id));
+        dynamic.models.retain(|id, _| managed_ids.contains(id));
+        dynamic.configs.extend(rollback.configs);
+        dynamic.models.extend(rollback.models);
+        dynamic.generation += 1;
     }
 
     fn validate_generic_id(&self, id: &str) -> Result<(), ProviderAdapterError> {
@@ -630,6 +774,15 @@ impl ProviderCatalogAdapter {
         &self,
         config: &DynamicProviderConfig,
     ) -> Result<Vec<CatalogModel>, ProviderAdapterError> {
+        let snapshot = self.manager.snapshot();
+        self.validate_and_static_models_against(config, &snapshot)
+    }
+
+    fn validate_and_static_models_against(
+        &self,
+        config: &DynamicProviderConfig,
+        snapshot: &CatalogSnapshot,
+    ) -> Result<Vec<CatalogModel>, ProviderAdapterError> {
         let canonical_base_url = config
             .canonical_base_url()
             .map_err(|_| ProviderAdapterError::InvalidDynamicConfig)?;
@@ -645,7 +798,6 @@ impl ProviderCatalogAdapter {
             "health",
         )?;
         validate_url(&health_endpoint, config.allow_insecure_http)?;
-        let snapshot = self.manager.snapshot();
         Ok(merge_dynamic_models(
             config.protocol,
             &config.models,
@@ -727,6 +879,7 @@ impl ProviderCatalogAdapter {
             )),
         };
 
+        let _dynamic_transaction = self.dynamic_transaction_guard().await;
         match discovered {
             Ok(models) => {
                 let entry = CachedProviderModels::new(
