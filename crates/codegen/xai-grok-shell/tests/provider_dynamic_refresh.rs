@@ -11,8 +11,7 @@ use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use xai_grok_catalog::{
-    CachedModel, CachedProviderModels, DynamicCache, DynamicProviderConfig, HttpError, ModelId,
-    ProviderId,
+    CachedModel, CachedProviderModels, DynamicCache, DynamicProviderConfig, ModelId, ProviderId,
 };
 use xai_grok_shell::agent::config::{Config, resolve_credentials_with, sampling_config_for_model};
 use xai_grok_shell::agent::models::ModelsManager;
@@ -164,7 +163,10 @@ async fn non_loopback_http_is_rejected_before_model_becomes_sampleable() {
     let tmp = tempfile::tempdir().unwrap();
     let adapter = ProviderCatalogAdapter::from_grok_home(tmp.path().to_path_buf());
 
-    let mut config = dynamic_config("lan", "http://192.168.1.20:20128/v1");
+    // Construct a valid config first, then mutate the public compatibility
+    // field to prove adapter registration revalidates it before publication.
+    let mut config = dynamic_config("lan", "https://example.com/v1");
+    config.base_url = "http://192.168.1.20:20128/v1".to_owned();
     // A static model that would become sampleable if configuration passed.
     config.models.insert(
         ModelId::new("lan-model").unwrap(),
@@ -181,11 +183,8 @@ async fn non_loopback_http_is_rejected_before_model_becomes_sampleable() {
 
     let err = adapter.configure_dynamic(config).unwrap_err();
     assert!(
-        matches!(
-            err,
-            ProviderAdapterError::Endpoint(HttpError::InsecureHttpDenied)
-        ),
-        "expected InsecureHttpDenied, got: {err:?}"
+        matches!(err, ProviderAdapterError::InvalidDynamicConfig),
+        "expected invalid dynamic config, got: {err:?}"
     );
 
     // Nothing was registered or published: no provider, no model.

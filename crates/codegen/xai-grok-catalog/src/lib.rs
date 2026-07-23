@@ -23,7 +23,9 @@ pub use credentials::{
     SecretString, classify_provider, resolve_credential,
 };
 pub use discovery::{DiscoveredModel, DiscoveryError, parse_model_list};
-pub use dynamic::{DynamicConfigError, DynamicProviderConfig, merge_dynamic_models};
+pub use dynamic::{
+    DynamicConfigError, DynamicProviderConfig, canonicalize_base_url, merge_dynamic_models,
+};
 pub use dynamic_cache::{
     CachedModel, CachedProviderModels, DYNAMIC_CACHE_SCHEMA_VERSION, DiscoveryRefreshError,
     DynamicCache, DynamicCacheError, DynamicCacheFile, DynamicRefreshOutcome, DynamicRefreshStatus,

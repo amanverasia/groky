@@ -9,7 +9,10 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use url::Url;
+
 use crate::discovery::DiscoveredModel;
+use crate::http::{HttpError, validate_url};
 use crate::layer::ModelPatch;
 use crate::limits::{MAX_ENDPOINT_BYTES, MAX_PROVIDER_ID_BYTES, MAX_PROVIDER_NAME_BYTES};
 use crate::types::{CatalogModel, ModelCost, ModelId, Protocol, ProviderId};
@@ -32,6 +35,12 @@ pub enum DynamicConfigError {
     /// A model key failed [`ModelId`] validation.
     #[error("invalid model id: {0}")]
     InvalidModelId(String),
+    /// The provider base URL violates the dynamic-provider URL policy.
+    #[error("invalid base URL: {0}")]
+    InvalidBaseUrl(#[from] HttpError),
+    /// A base URL must not contain a query string or fragment.
+    #[error("base URL must not contain a query string or fragment")]
+    BaseUrlHasQueryOrFragment,
 }
 
 /// A user-declared dynamic provider, validated at the configuration boundary.
@@ -46,8 +55,13 @@ pub struct DynamicProviderConfig {
     pub id: ProviderId,
     /// Human-readable display name.
     pub name: String,
-    /// API base URL.
+    /// API base URL in its configured lexical form, retained for compatibility.
     pub base_url: String,
+    /// Ordered environment-variable names used to locate credentials.
+    ///
+    /// This is metadata only; values are never accepted or serialized here.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
     /// Wire protocol; serialized as `api_backend`.
     #[serde(rename = "api_backend")]
     pub protocol: Protocol,
@@ -74,22 +88,66 @@ impl DynamicProviderConfig {
         name: impl Into<String>,
         base_url: impl Into<String>,
     ) -> Result<Self, DynamicConfigError> {
+        Self::new_with_policy(id, name, base_url, false)
+    }
+
+    /// Constructs a provider after validating its base URL with the selected
+    /// plain-HTTP policy.
+    pub fn new_with_policy(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        allow_insecure_http: bool,
+    ) -> Result<Self, DynamicConfigError> {
         let id = validate_provider_id(id.into())?;
         let name = validate_provider_name(name.into())?;
         let base_url = validate_endpoint(base_url.into())?;
+        canonicalize_base_url(&base_url, allow_insecure_http)?;
         Ok(Self {
             id,
             name,
             base_url,
+            env_vars: Vec::new(),
             protocol: Protocol::default(),
             unauthenticated: false,
             discover: false,
             models_endpoint: None,
             health_endpoint: None,
-            allow_insecure_http: false,
+            allow_insecure_http,
             models: IndexMap::new(),
         })
     }
+
+    /// Returns the canonical identity URL for this provider's base endpoint.
+    pub fn canonical_base_url(&self) -> Result<String, DynamicConfigError> {
+        canonicalize_base_url(&self.base_url, self.allow_insecure_http)
+    }
+}
+
+/// Validates and canonicalizes a provider base URL for identity comparisons.
+///
+/// Hosts are lower-cased by `url`, default ports are omitted, and trailing
+/// slashes are removed except at the origin root. Meaningful path segments are
+/// otherwise preserved. Queries, fragments, and userinfo are not valid base
+/// endpoint identity.
+pub fn canonicalize_base_url(
+    base_url: &str,
+    allow_insecure_http: bool,
+) -> Result<String, DynamicConfigError> {
+    let mut url = Url::parse(base_url).map_err(|err| HttpError::InvalidUrl(err.to_string()))?;
+    validate_url(&url, allow_insecure_http)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(DynamicConfigError::BaseUrlHasQueryOrFragment);
+    }
+    if matches!(
+        (url.scheme(), url.port()),
+        ("https", Some(443)) | ("http", Some(80))
+    ) {
+        let _ = url.set_port(None);
+    }
+    let path = url.path().trim_end_matches('/').to_owned();
+    url.set_path(if path.is_empty() { "/" } else { &path });
+    Ok(url.to_string())
 }
 
 fn validate_provider_id(id: String) -> Result<ProviderId, DynamicConfigError> {
@@ -120,6 +178,8 @@ struct RawDynamicProviderConfig {
     id: String,
     name: String,
     base_url: String,
+    #[serde(default)]
+    env_vars: Vec<String>,
     #[serde(default, rename = "api_backend")]
     protocol: Protocol,
     #[serde(default)]
@@ -161,6 +221,7 @@ impl TryFrom<RawDynamicProviderConfig> for DynamicProviderConfig {
         let id = validate_provider_id(raw.id)?;
         let name = validate_provider_name(raw.name)?;
         let base_url = validate_endpoint(raw.base_url)?;
+        canonicalize_base_url(&base_url, raw.allow_insecure_http)?;
         let models_endpoint = raw.models_endpoint.map(validate_endpoint).transpose()?;
         let health_endpoint = raw.health_endpoint.map(validate_endpoint).transpose()?;
         let mut models = IndexMap::with_capacity(raw.models.len());
@@ -184,6 +245,7 @@ impl TryFrom<RawDynamicProviderConfig> for DynamicProviderConfig {
             id,
             name,
             base_url,
+            env_vars: raw.env_vars,
             protocol: raw.protocol,
             unauthenticated: raw.unauthenticated,
             discover: raw.discover,
@@ -359,6 +421,85 @@ mod tests {
             .map(|(_, patch)| patch)
             .expect("hyphenated model id preserved");
         assert_eq!(best.context_window, Some(32768));
+    }
+
+    #[test]
+    fn env_vars_are_names_only_ordered_metadata() {
+        let config: DynamicProviderConfig = toml::from_str(
+            r#"
+            id = "local"
+            name = "Local Gateway"
+            base_url = "http://127.0.0.1:9000/v1"
+            env_vars = ["FIRST_KEY", "SECOND_KEY", "FIRST_KEY"]
+            "#,
+        )
+        .expect("env var names parse");
+        assert_eq!(config.env_vars, ["FIRST_KEY", "SECOND_KEY", "FIRST_KEY"]);
+        assert!(
+            DynamicProviderConfig::new("local", "Local", "http://127.0.0.1:9000/v1")
+                .unwrap()
+                .env_vars
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn secret_bearing_config_fields_are_rejected() {
+        let err = toml::from_str::<DynamicProviderConfig>(
+            r#"
+            id = "local"
+            name = "Local Gateway"
+            base_url = "http://127.0.0.1:9000/v1"
+            api_key = "not-accepted"
+            "#,
+        )
+        .expect_err("secret-bearing fields must not deserialize");
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn canonical_base_url_equates_lexical_variants_but_keeps_paths_distinct() {
+        let first =
+            DynamicProviderConfig::new("local", "Local", "https://EXAMPLE.com:443/v1/").unwrap();
+        let equivalent =
+            DynamicProviderConfig::new("local", "Local", "https://example.com/v1").unwrap();
+        let other_path =
+            DynamicProviderConfig::new("local", "Local", "https://example.com/v2").unwrap();
+        assert_eq!(
+            first.canonical_base_url().unwrap(),
+            "https://example.com/v1"
+        );
+        assert_eq!(first.canonical_base_url(), equivalent.canonical_base_url());
+        assert_ne!(first.canonical_base_url(), other_path.canonical_base_url());
+    }
+
+    #[test]
+    fn base_url_enforces_url_policy_and_rejects_query_fragment_and_userinfo() {
+        assert!(matches!(
+            DynamicProviderConfig::new("remote", "Remote", "http://example.com/v1"),
+            Err(DynamicConfigError::InvalidBaseUrl(
+                HttpError::InsecureHttpDenied
+            ))
+        ));
+        assert!(
+            DynamicProviderConfig::new_with_policy(
+                "remote",
+                "Remote",
+                "http://example.com/v1",
+                true
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            DynamicProviderConfig::new("local", "Local", "https://example.com/v1?x=y"),
+            Err(DynamicConfigError::BaseUrlHasQueryOrFragment)
+        ));
+        assert!(matches!(
+            DynamicProviderConfig::new("local", "Local", "https://key@example.com/v1"),
+            Err(DynamicConfigError::InvalidBaseUrl(
+                HttpError::CredentialsInUrl
+            ))
+        ));
     }
 
     #[test]

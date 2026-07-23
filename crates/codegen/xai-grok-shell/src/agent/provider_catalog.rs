@@ -96,7 +96,10 @@ pub enum ProviderAdapterError {
     /// [`ProviderCatalogAdapter::configure_dynamic`].
     #[error("unknown dynamic provider {0:?}")]
     UnknownDynamicProvider(String),
-    /// A base URL or derived endpoint violates the dynamic URL policy.
+    /// A base URL violates the dynamic configuration policy.
+    #[error("invalid dynamic provider configuration")]
+    InvalidDynamicConfig,
+    /// A derived endpoint violates the dynamic URL policy.
     #[error("invalid dynamic provider endpoint: {0}")]
     Endpoint(#[from] HttpError),
     /// Persisting the provider config or key failed (I/O detail is local
@@ -328,8 +331,8 @@ struct ComposedSnapshot {
 }
 
 /// The provider entry a dynamic config contributes to the catalog layer.
-/// Secret-free: dynamic providers have no env var names; credentials come
-/// from session/stored scopes keyed by provider id.
+/// Secret-free: dynamic providers carry only ordered environment-variable
+/// names; credential values come from session/stored/environment scopes.
 fn dynamic_catalog_provider(
     config: &DynamicProviderConfig,
     models: Vec<CatalogModel>,
@@ -338,7 +341,7 @@ fn dynamic_catalog_provider(
         id: config.id.clone(),
         name: config.name.clone(),
         api_base_url: config.base_url.clone(),
-        env_vars: Vec::new(),
+        env_vars: config.env_vars.clone(),
         unauthenticated: config.unauthenticated,
         models,
     }
@@ -527,9 +530,9 @@ impl ProviderCatalogAdapter {
                 config.id.as_str().to_owned(),
             ));
         }
-        let base = url::Url::parse(&config.base_url)
-            .map_err(|err| HttpError::InvalidUrl(err.to_string()))?;
-        validate_url(&base, config.allow_insecure_http)?;
+        config
+            .canonical_base_url()
+            .map_err(|_| ProviderAdapterError::InvalidDynamicConfig)?;
         let models_endpoint = derive_endpoint(
             &config.base_url,
             config.models_endpoint.as_deref(),
@@ -618,18 +621,18 @@ impl ProviderCatalogAdapter {
 
         match discovered {
             Ok(models) => {
-                let entry = CachedProviderModels {
-                    provider_id: provider_id.clone(),
-                    base_url: config.base_url.clone(),
-                    fetched_at_unix: now_unix(),
-                    models: models
+                let entry = CachedProviderModels::new(
+                    &config,
+                    now_unix(),
+                    models
                         .iter()
                         .map(|model| CachedModel {
                             id: model.id.clone(),
                             name: model.name.clone(),
                         })
                         .collect(),
-                };
+                )
+                .map_err(|_| ProviderAdapterError::InvalidDynamicConfig)?;
                 // All cache writes hold this async mutex for the whole
                 // read-modify-write, so concurrent refreshes cannot lose
                 // each other's provider entries.
@@ -658,7 +661,7 @@ impl ProviderCatalogAdapter {
                         .load()
                         .await
                         .ok()
-                        .and_then(|file| file.provider(provider_id).cloned())
+                        .and_then(|file| file.applicable_provider(&config).cloned())
                 };
                 if cached.is_none() && config.models.is_empty() {
                     return Ok(ProviderCatalogEvent::DynamicRefreshFailed {
@@ -745,13 +748,13 @@ impl ProviderCatalogAdapter {
         let adapter = Arc::clone(self);
         let on_event: Arc<dyn Fn(ProviderCatalogEvent) + Send + Sync> = Arc::new(on_event);
         tokio::spawn(async move {
-            let candidates: Vec<ProviderId> = adapter
+            let candidates: Vec<DynamicProviderConfig> = adapter
                 .dynamic
                 .lock()
                 .configs
                 .values()
                 .filter(|config| config.discover)
-                .map(|config| config.id.clone())
+                .cloned()
                 .collect();
             if candidates.is_empty() {
                 return;
@@ -765,11 +768,12 @@ impl ProviderCatalogAdapter {
             let max_age = i64::try_from(xai_grok_catalog::limits::DYNAMIC_CACHE_MAX_AGE.as_secs())
                 .unwrap_or(i64::MAX);
             let now = now_unix();
-            for provider_id in candidates {
+            for config in candidates {
+                let provider_id = config.id.clone();
                 let stale = force
                     || cache_file
                         .as_ref()
-                        .and_then(|file| file.provider(&provider_id))
+                        .and_then(|file| file.applicable_provider(&config))
                         .is_none_or(|entry| now.saturating_sub(entry.fetched_at_unix) >= max_age);
                 if !stale {
                     continue;
@@ -859,7 +863,7 @@ impl ProviderCatalogAdapter {
                 }
                 other => other.to_string(),
             };
-            let cached_models = self.cached_dynamic_model_count(&provider_id).await;
+            let cached_models = self.cached_dynamic_model_count(&config).await;
             tracing::warn!(
                 provider = provider_id.as_str(),
                 cached_models,
@@ -907,7 +911,7 @@ impl ProviderCatalogAdapter {
         {
             let redacted = redact_userinfo(&health_endpoint);
             let message = janus_failure(&janus_failure_from_http(&err, &redacted));
-            let cached_models = self.cached_dynamic_model_count(&provider_id).await;
+            let cached_models = self.cached_dynamic_model_count(&config).await;
             tracing::warn!(
                 provider = provider_id.as_str(),
                 url = %redacted,
@@ -984,14 +988,17 @@ impl ProviderCatalogAdapter {
             .map(|resolved| resolved.secret)
     }
 
-    /// Number of models in the last-known-good cache for `provider_id`.
-    async fn cached_dynamic_model_count(&self, provider_id: &ProviderId) -> usize {
+    /// Number of models in the applicable last-known-good cache entry.
+    async fn cached_dynamic_model_count(&self, config: &DynamicProviderConfig) -> usize {
         let cache = self.dynamic_cache.lock().await;
         cache
             .load()
             .await
             .ok()
-            .and_then(|file| file.provider(provider_id).map(|entry| entry.models.len()))
+            .and_then(|file| {
+                file.applicable_provider(config)
+                    .map(|entry| entry.models.len())
+            })
             .unwrap_or(0)
     }
 
