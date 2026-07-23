@@ -41,11 +41,12 @@ Credential resolution precedence, at request time:
 3. **Environment variable** — the provider's documented env var(s) from the
    catalog (e.g. `OPENAI_API_KEY`).
 
-Dynamic providers declare no environment variable names, so for them the
-effective order is session > stored. For providers marked `unauthenticated`
-a key is *optional*, not forbidden: if a key exists it is sent (discovery,
-health checks, and inference all follow this rule); if none exists, requests
-go out without an `Authorization` header.
+Dynamic providers may declare ordered environment-variable names as
+secret-free metadata. Their effective order is session > stored > configured
+environment. They never fall back to xAI session credentials or `XAI_API_KEY`.
+For providers marked `unauthenticated` a key is *optional*, not forbidden: if
+a key exists it is sent (discovery, health checks, and inference all follow
+this rule); if none exists, requests go out without an `Authorization` header.
 
 ## Janus
 
@@ -131,17 +132,16 @@ Discovered models are cached (secret-free: model IDs and names only) in
 
 ## Known limitations
 
-- **Generic `[provider.<id>]` TOML-configured dynamic providers are not yet
-  wired.** The catalog crate can validate and deserialize dynamic-provider
-  TOML (`discover = true`, static `models`, endpoint overrides), and the
-  shell exposes a programmatic `ProviderCatalogAdapter::configure_dynamic`
-  API, but the shell's config loading does not yet register dynamic
-  providers declared in `config.toml`. Today the only end-to-end dynamic
-  provider is the Janus preset via `/providers`.
-- **A dynamic provider that reuses a catalog provider id replaces that
-  catalog entry** in the composed snapshot. Because dynamic providers carry
-  no env-var names, environment-variable credential resolution for the
-  shadowed catalog provider stops working.
-- **The dynamic cache is keyed by provider id only.** After changing a
-  provider's base URL, previously discovered models are still served until
-  the next successful refresh against the new URL.
+- **Generic `[dynamic_provider.<id>]` TOML configuration is not yet wired into
+  startup/reload.** The catalog and adapter validate dynamic configuration and
+  expose transactional `upsert_dynamic`, `replace_dynamic`, and
+  `remove_dynamic` APIs, but the shell config loader does not activate those
+  declarations yet. Today the only persisted end-to-end setup flow is Janus
+  via `/providers`.
+- **Dynamic IDs cannot shadow catalog or dedicated-provider IDs.** Generic
+  mutation rejects `xai`, `janus`, duplicates, and IDs owned by the current
+  catalog; composition also suppresses a dynamic layer if a later catalog
+  refresh acquires its ID.
+- **Dynamic cache reuse is scoped to provider ID and canonical base URL.** A
+  base-URL change forces discovery and cannot publish models cached from the
+  old origin.

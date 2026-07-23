@@ -92,6 +92,12 @@ pub enum ProviderAdapterError {
     /// The provider id collides with a provider owned by a dedicated flow.
     #[error("provider id {0:?} is reserved")]
     ReservedProviderId(String),
+    /// The provider id collides with the bundled or refreshed catalog.
+    #[error("provider id {0:?} already belongs to the catalog")]
+    CatalogProviderIdCollision(String),
+    /// More than one replacement declaration used the same provider id.
+    #[error("dynamic provider id {0:?} is duplicated")]
+    DuplicateDynamicProviderId(String),
     /// The provider was never registered via
     /// [`ProviderCatalogAdapter::configure_dynamic`].
     #[error("unknown dynamic provider {0:?}")]
@@ -190,7 +196,11 @@ pub fn model_entry_from_catalog(
     Ok(ModelEntry {
         info,
         api_key: None,
-        env_key: None,
+        // Keep the effective catalog provider's ordered env-var names on the
+        // entry. This is both the configured credential fallback and the
+        // value consumed later by `ModelsManager::sampling_config`; never
+        // fall back to a separately loaded bundled catalog after overrides.
+        env_key: Some(EnvKeys::new(provider.env_vars.iter().cloned())),
         api_base_url: None,
         provider_id: Some(provider.id.clone()),
         // `unauthenticated` means a key is *optional*, not forbidden (the
@@ -263,14 +273,9 @@ pub fn provider_model_entries(
         ) {
             continue;
         }
-        let override_env_key = overrides.and_then(|o| o.env_key.clone());
         for model in &provider.models {
             match model_entry_from_catalog(&provider, model) {
-                Ok(mut entry) => {
-                    // Route the `[provider.<id>] env_key` override to the
-                    // credential seam: entry-level env names (names only,
-                    // never values) replace the embedded-catalog fallback.
-                    entry.env_key.clone_from(&override_env_key);
+                Ok(entry) => {
                     let key = format!("{}/{}", provider.id.as_str(), model.id.as_str());
                     entries.insert(key, entry);
                 }
@@ -320,7 +325,11 @@ pub struct ProviderCatalogAdapter {
 struct DynamicState {
     configs: IndexMap<String, DynamicProviderConfig>,
     models: IndexMap<String, Vec<CatalogModel>>,
-    /// Bumped on any mutation; invalidates the composed-snapshot memo.
+    /// IDs owned by a dedicated setup flow. Generic mutation APIs neither
+    /// accept nor replace these registrations (currently only Janus).
+    managed_ids: HashSet<String>,
+    /// Bumped once for each committed state transition; invalidates the
+    /// composed-snapshot memo.
     generation: u64,
 }
 
@@ -328,6 +337,12 @@ struct ComposedSnapshot {
     base: Arc<CatalogSnapshot>,
     generation: u64,
     composed: Arc<CatalogSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+enum GenericDynamicMutation {
+    Upsert,
+    Replace,
 }
 
 /// The provider entry a dynamic config contributes to the catalog layer.
@@ -408,6 +423,11 @@ impl ProviderCatalogAdapter {
                 .models
                 .iter()
                 .filter_map(|(id, models)| {
+                    // A catalog refresh may add an ID after dynamic registration.
+                    // Never let a dynamic layer replace a catalog-owned provider.
+                    if base.catalog().provider_str(id).is_some() {
+                        return None;
+                    }
                     dynamic
                         .configs
                         .get(id)
@@ -511,54 +531,142 @@ impl ProviderCatalogAdapter {
 
     // ── Dynamic providers ───────────────────────────────────────────
 
-    /// Registers a user-declared dynamic provider.
-    ///
-    /// Validates the inference base URL and the derived models/health
-    /// endpoints against the provider's actual `allow_insecure_http` flag
-    /// BEFORE anything is registered or published: a provider must not pass
-    /// discovery only to later send prompts or credentials to a disallowed
-    /// plain-HTTP inference URL. Statically declared models are published
-    /// immediately (no network I/O); discovered models arrive via
-    /// [`Self::refresh_dynamic`]. Rejects ids owned by dedicated flows
-    /// (`xai`).
+    /// Insert or replace one generic dynamic provider atomically.
+    pub fn upsert_dynamic(
+        &self,
+        config: DynamicProviderConfig,
+    ) -> Result<(), ProviderAdapterError> {
+        self.commit_generic_dynamic(std::iter::once(config), GenericDynamicMutation::Upsert)
+    }
+
+    /// Atomically replace every generic dynamic registration. The complete
+    /// input is validated before the live state or its generation changes.
+    /// Dedicated registrations (Janus) stay intact.
+    pub fn replace_dynamic(
+        &self,
+        configs: impl IntoIterator<Item = DynamicProviderConfig>,
+    ) -> Result<(), ProviderAdapterError> {
+        self.commit_generic_dynamic(configs, GenericDynamicMutation::Replace)
+    }
+
+    /// Remove one generic dynamic provider. Dedicated registrations (Janus)
+    /// and catalog-owned IDs cannot be removed through this public path.
+    pub fn remove_dynamic(&self, provider_id: &ProviderId) -> Result<(), ProviderAdapterError> {
+        let id = provider_id.as_str();
+        self.validate_generic_id(id)?;
+        let mut dynamic = self.dynamic.lock();
+        if dynamic.managed_ids.contains(id) {
+            return Err(ProviderAdapterError::ReservedProviderId(id.to_owned()));
+        }
+        if !dynamic.configs.contains_key(id) {
+            return Err(ProviderAdapterError::UnknownDynamicProvider(id.to_owned()));
+        }
+        dynamic.configs.shift_remove(id);
+        dynamic.models.shift_remove(id);
+        dynamic.generation += 1;
+        Ok(())
+    }
+
+    /// Compatibility wrapper for callers predating the explicit API. Generic
+    /// calls have the same collision rules as `upsert_dynamic`; only the
+    /// private Janus path may register the reserved Janus ID.
     pub fn configure_dynamic(
         &self,
         config: DynamicProviderConfig,
     ) -> Result<(), ProviderAdapterError> {
-        if config.id.as_str() == "xai" {
-            return Err(ProviderAdapterError::ReservedProviderId(
-                config.id.as_str().to_owned(),
+        self.upsert_dynamic(config)
+    }
+
+    fn commit_generic_dynamic(
+        &self,
+        configs: impl IntoIterator<Item = DynamicProviderConfig>,
+        mutation: GenericDynamicMutation,
+    ) -> Result<(), ProviderAdapterError> {
+        let configs: Vec<_> = configs.into_iter().collect();
+        let mut seen = HashSet::with_capacity(configs.len());
+        let mut prepared = Vec::with_capacity(configs.len());
+        for config in configs {
+            let id = config.id.as_str().to_owned();
+            if !seen.insert(id.clone()) {
+                return Err(ProviderAdapterError::DuplicateDynamicProviderId(id));
+            }
+            self.validate_generic_id(&id)?;
+            let statics = self.validate_and_static_models(&config)?;
+            prepared.push((id, config, statics));
+        }
+
+        let mut dynamic = self.dynamic.lock();
+        for (id, _, _) in &prepared {
+            if dynamic.managed_ids.contains(id) {
+                return Err(ProviderAdapterError::ReservedProviderId(id.clone()));
+            }
+        }
+        if matches!(mutation, GenericDynamicMutation::Replace) {
+            let managed_ids = dynamic.managed_ids.clone();
+            dynamic.configs.retain(|id, _| managed_ids.contains(id));
+            dynamic.models.retain(|id, _| managed_ids.contains(id));
+        }
+        for (id, config, statics) in prepared {
+            dynamic.configs.insert(id.clone(), config);
+            dynamic.models.insert(id, statics);
+        }
+        dynamic.generation += 1;
+        Ok(())
+    }
+
+    fn validate_generic_id(&self, id: &str) -> Result<(), ProviderAdapterError> {
+        if id == "xai" || id == JANUS_PROVIDER_ID {
+            return Err(ProviderAdapterError::ReservedProviderId(id.to_owned()));
+        }
+        if self.manager.snapshot().catalog().provider_str(id).is_some() {
+            return Err(ProviderAdapterError::CatalogProviderIdCollision(
+                id.to_owned(),
             ));
         }
-        config
+        Ok(())
+    }
+
+    fn validate_and_static_models(
+        &self,
+        config: &DynamicProviderConfig,
+    ) -> Result<Vec<CatalogModel>, ProviderAdapterError> {
+        let canonical_base_url = config
             .canonical_base_url()
             .map_err(|_| ProviderAdapterError::InvalidDynamicConfig)?;
         let models_endpoint = derive_endpoint(
-            &config.base_url,
+            &canonical_base_url,
             config.models_endpoint.as_deref(),
             "models",
         )?;
         validate_url(&models_endpoint, config.allow_insecure_http)?;
         let health_endpoint = derive_endpoint(
-            &config.base_url,
+            &canonical_base_url,
             config.health_endpoint.as_deref(),
             "health",
         )?;
         validate_url(&health_endpoint, config.allow_insecure_http)?;
+        let snapshot = self.manager.snapshot();
+        Ok(merge_dynamic_models(
+            config.protocol,
+            &config.models,
+            Vec::new(),
+            |id| snapshot.bundled_model_by_exact_id(id),
+        ))
+    }
 
-        // Publish the static layer (possibly empty) so the provider is
-        // visible in snapshots and its statically declared models are
-        // usable without a discovery round-trip.
-        let statics = {
-            let snapshot = self.manager.snapshot();
-            merge_dynamic_models(config.protocol, &config.models, Vec::new(), |id| {
-                snapshot.bundled_model_by_exact_id(id)
-            })
-        };
+    /// The only registration path permitted to own the Janus ID. All input is
+    /// validated before atomically replacing its config/models and advancing
+    /// generation exactly once.
+    fn configure_managed_janus(
+        &self,
+        config: DynamicProviderConfig,
+    ) -> Result<(), ProviderAdapterError> {
+        debug_assert_eq!(config.id.as_str(), JANUS_PROVIDER_ID);
+        let statics = self.validate_and_static_models(&config)?;
         let mut dynamic = self.dynamic.lock();
-        let id = config.id.as_str().to_owned();
-        dynamic.configs.insert(id.clone(), config);
-        dynamic.models.insert(id, statics);
+        dynamic.managed_ids.insert(JANUS_PROVIDER_ID.to_owned());
+        dynamic.configs.insert(JANUS_PROVIDER_ID.to_owned(), config);
+        dynamic.models.insert(JANUS_PROVIDER_ID.to_owned(), statics);
         dynamic.generation += 1;
         Ok(())
     }
@@ -635,9 +743,20 @@ impl ProviderCatalogAdapter {
                 .map_err(|_| ProviderAdapterError::InvalidDynamicConfig)?;
                 // All cache writes hold this async mutex for the whole
                 // read-modify-write, so concurrent refreshes cannot lose
-                // each other's provider entries.
+                // each other's provider entries. Re-check the live registration
+                // after acquiring it so a replacement/removal cannot race between
+                // validation and persistence.
                 let stored = {
                     let cache = self.dynamic_cache.lock().await;
+                    let still_current =
+                        self.dynamic.lock().configs.get(config.id.as_str()) == Some(&config);
+                    if !still_current {
+                        return Ok(ProviderCatalogEvent::DynamicRefreshComplete {
+                            provider_id: provider_id.clone(),
+                            model_count: 0,
+                            cached: false,
+                        });
+                    }
                     cache.store_provider(entry).await
                 };
                 if let Err(err) = stored {
@@ -697,7 +816,8 @@ impl ProviderCatalogAdapter {
     }
 
     /// Merges discovered/cached models with static config (bundled-catalog
-    /// enrichment on exact full-ID match) and publishes the layer.
+    /// enrichment on exact full-ID match) and publishes the layer only when
+    /// the live registration still matches the configuration that was refreshed.
     fn publish_dynamic_models(
         &self,
         config: &DynamicProviderConfig,
@@ -709,6 +829,13 @@ impl ProviderCatalogAdapter {
         });
         let count = merged.len();
         let mut dynamic = self.dynamic.lock();
+        if dynamic
+            .configs
+            .get(config.id.as_str())
+            .is_none_or(|current| current != config)
+        {
+            return 0;
+        }
         dynamic.models.insert(config.id.as_str().to_owned(), merged);
         dynamic.generation += 1;
         count
@@ -850,7 +977,7 @@ impl ProviderCatalogAdapter {
         let mut config = janus_preset();
         config.base_url = request.base_url.clone();
         config.allow_insecure_http = request.allow_insecure_http;
-        if let Err(err) = self.configure_dynamic(config.clone()) {
+        if let Err(err) = self.configure_managed_janus(config.clone()) {
             // The raw base URL may embed userinfo credentials (that is one
             // of the ways validation fails); redact before it can reach a
             // user-facing message, and drop it entirely if unparseable.
@@ -1085,7 +1212,7 @@ impl ProviderCatalogAdapter {
             let mut config = janus_preset();
             config.base_url = persisted.base_url;
             config.allow_insecure_http = persisted.allow_insecure_http;
-            if let Err(err) = self.configure_dynamic(config) {
+            if let Err(err) = self.configure_managed_janus(config) {
                 tracing::warn!(
                     provider = %persisted.id,
                     error = %err,

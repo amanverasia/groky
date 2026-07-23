@@ -118,7 +118,10 @@ fn adapter_uses_qualified_ids_and_never_copies_credentials() {
     );
     assert_eq!(entry.credential_policy, CredentialPolicy::ProviderApiKey);
     assert!(entry.api_key.is_none());
-    assert!(entry.env_key.is_none());
+    assert_eq!(
+        entry.env_key.as_ref().and_then(|keys| keys.primary()),
+        Some("OPENAI_API_KEY")
+    );
 }
 
 #[test]

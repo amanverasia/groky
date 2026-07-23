@@ -48,7 +48,7 @@ pub enum DynamicConfigError {
 /// Deserialization routes through a raw mirror type so that TOML/JSON input
 /// cannot bypass the identifier and endpoint bounds enforced by
 /// [`DynamicProviderConfig::new`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawDynamicProviderConfig")]
 pub struct DynamicProviderConfig {
     /// Provider identifier.

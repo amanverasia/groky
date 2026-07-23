@@ -19,6 +19,7 @@ use xai_grok_shell::agent::provider_catalog::{
     DYNAMIC_MODELS_CACHE_FILE, ProviderAdapterError, ProviderCatalogAdapter, ProviderCatalogEvent,
 };
 use xai_grok_shell::auth::{AuthManager, GrokComConfig};
+use xai_grok_test_support::env::EnvGuard;
 
 fn provider_id(id: &str) -> ProviderId {
     ProviderId::new(id).unwrap()
@@ -111,6 +112,51 @@ async fn refresh_publishes_discovered_models_without_changing_selection() {
     unsafe { std::env::remove_var("GROK_HOME") };
 }
 
+#[test]
+fn generic_mutations_prevalidate_and_commit_atomically() {
+    let tmp = tempfile::tempdir().unwrap();
+    let adapter = ProviderCatalogAdapter::from_grok_home(tmp.path().to_path_buf());
+    let first = dynamic_config("first", "https://first.example/v1");
+    adapter.upsert_dynamic(first).unwrap();
+    // A duplicate batch is rejected before the valid preceding item can be
+    // committed, leaving the composed snapshot identity/content unchanged.
+    let err = adapter
+        .replace_dynamic([
+            dynamic_config("second", "https://second.example/v1"),
+            dynamic_config("second", "https://other.example/v1"),
+        ])
+        .unwrap_err();
+    assert!(matches!(err, ProviderAdapterError::DuplicateDynamicProviderId(id) if id == "second"));
+    let after = adapter.snapshot();
+    assert!(after.catalog().provider_str("first").is_some());
+    assert!(after.catalog().provider_str("second").is_none());
+
+    // Generic calls may neither claim dedicated/catalog identities nor mutate
+    // an existing registration when rejected.
+    for id in ["xai", "janus", "openai"] {
+        let err = adapter
+            .upsert_dynamic(dynamic_config(id, "https://collision.example/v1"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderAdapterError::ReservedProviderId(_)
+                | ProviderAdapterError::CatalogProviderIdCollision(_)
+        ));
+    }
+    assert!(adapter.snapshot().catalog().provider_str("first").is_some());
+
+    // A valid replacement is one state transition: it removes the old generic
+    // layer and installs the full new batch.
+    adapter
+        .replace_dynamic([dynamic_config("third", "https://third.example/v1")])
+        .unwrap();
+    let snapshot = adapter.snapshot();
+    assert!(snapshot.catalog().provider_str("first").is_none());
+    assert!(snapshot.catalog().provider_str("third").is_some());
+    adapter.remove_dynamic(&provider_id("third")).unwrap();
+    assert!(adapter.snapshot().catalog().provider_str("third").is_none());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn offline_refresh_publishes_cached_models_and_warning() {
     let tmp = tempfile::tempdir().unwrap();
@@ -193,6 +239,56 @@ async fn non_loopback_http_is_rejected_before_model_becomes_sampleable() {
     assert!(
         adapter.refresh_dynamic(&provider_id("lan")).await.is_err(),
         "a rejected provider must not be refreshable"
+    );
+}
+
+#[test]
+#[serial(provider_env)]
+fn models_manager_sampling_config_uses_dynamic_env_and_exact_wire_contract() {
+    const DYNAMIC_KEY: &str = "dynamic-env-secret";
+    const XAI_KEY: &str = "must-not-be-used";
+    let tmp = tempfile::tempdir().unwrap();
+    let _groky_home = EnvGuard::set("GROKY_HOME", tmp.path());
+    let _grok_home = EnvGuard::set("GROK_HOME", tmp.path());
+    let _dynamic_key = EnvGuard::set("LOCALGW_API_KEY", DYNAMIC_KEY);
+    let _xai_key = EnvGuard::set("XAI_API_KEY", XAI_KEY);
+
+    let adapter = Arc::new(ProviderCatalogAdapter::from_grok_home(
+        tmp.path().to_path_buf(),
+    ));
+    let mut config = dynamic_config("localgw", "https://gateway.example/v1");
+    config.discover = false;
+    config.env_vars = vec!["LOCALGW_API_KEY".to_owned()];
+    config.protocol = xai_grok_catalog::Protocol::Responses;
+    config.models.insert(
+        ModelId::new("openai/gpt-4o").unwrap(),
+        xai_grok_catalog::ModelPatch {
+            id: ModelId::new("openai/gpt-4o").unwrap(),
+            name: Some("Gateway GPT-4o".to_owned()),
+            protocol: None,
+            context_window: None,
+            reasoning: None,
+            cost: None,
+            exclude: false,
+        },
+    );
+    adapter.upsert_dynamic(config).unwrap();
+
+    let cfg = Config::default();
+    let auth = Arc::new(AuthManager::new(tmp.path(), GrokComConfig::default()));
+    let mgr = ModelsManager::from_config(&cfg, None, auth).unwrap();
+    mgr.set_provider_catalog(adapter);
+    mgr.rebuild_provider_models();
+    mgr.set_current_model_id(agent_client_protocol::ModelId::new("localgw/openai/gpt-4o"));
+
+    let sampling = mgr.sampling_config();
+    assert_eq!(sampling.api_key.as_deref(), Some(DYNAMIC_KEY));
+    assert_ne!(sampling.api_key.as_deref(), Some(XAI_KEY));
+    assert_eq!(sampling.base_url, "https://gateway.example/v1");
+    assert_eq!(sampling.model, "openai/gpt-4o");
+    assert_eq!(
+        sampling.api_backend,
+        xai_grok_shell::sampling::ApiBackend::Responses
     );
 }
 
