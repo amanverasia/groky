@@ -27,16 +27,53 @@ pub fn bootstrap(
     crate::managed_config::managed_policy_gate()?;
     let cfg = resolve_config(cfg, auth_manager);
     cfg.validate_model_filters()?;
-    init_process(&cfg, auth_manager);
-    let models_manager = ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?;
 
-    // Configured-provider catalog: constructed from the embedded snapshot plus
-    // `$GROK_HOME/provider_catalog.json` (24h freshness) — no network here.
-    models_manager.set_provider_catalog(Arc::new(
+    // Validate dynamic configuration before process-level initialization side
+    // effects. Adapter construction is local-only (embedded/on-disk cache).
+    let provider_adapter = Arc::new(
         crate::agent::provider_catalog::ProviderCatalogAdapter::from_grok_home(
             crate::util::grok_home::grok_home(),
         ),
-    ));
+    );
+    provider_adapter
+        .replace_dynamic(cfg.dynamic_providers.values().cloned())
+        .map_err(|_| "invalid dynamic provider configuration".to_owned())?;
+    provider_adapter.hydrate_dynamic_from_cache();
+
+    init_process(&cfg, auth_manager);
+    let models_manager = ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?;
+
+    // Attach the prevalidated adapter so static models are present in the first
+    // composed provider snapshot visible to callers.
+    models_manager.set_provider_catalog(Arc::clone(&provider_adapter));
+
+    // Discovery is stale-gated and fully asynchronous: startup returns with
+    // static models immediately, then ordinary model-update notifications are
+    // emitted as discovered/cached models are published.
+    if provider_adapter.has_discovery_enabled_dynamic()
+        && tokio::runtime::Handle::try_current().is_ok()
+    {
+        let dynamic_models = models_manager.clone();
+        provider_adapter.refresh_stale_dynamic_in_background(move |event| match event {
+            crate::agent::provider_catalog::ProviderCatalogEvent::DynamicRefreshComplete {
+                ..
+            } => dynamic_models.rebuild_provider_models(),
+            crate::agent::provider_catalog::ProviderCatalogEvent::DynamicRefreshFailed {
+                provider_id,
+                message,
+            } => tracing::warn!(
+                provider = provider_id.as_str(),
+                %message,
+                "dynamic provider startup refresh failed"
+            ),
+            crate::agent::provider_catalog::ProviderCatalogEvent::DynamicRefreshStarted {
+                ..
+            }
+            | crate::agent::provider_catalog::ProviderCatalogEvent::JanusHealthComplete {
+                ..
+            } => {}
+        });
+    }
 
     // Refresh on every auth refresh — the FSEvents watcher can silently die after
     // macOS sleep, stranding the catalog on bundled defaults.
