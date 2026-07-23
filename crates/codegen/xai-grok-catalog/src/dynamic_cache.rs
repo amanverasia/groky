@@ -204,6 +204,12 @@ impl DynamicCache {
             .map_err(|err| DynamicCacheError::Io(err.to_string()))?
     }
 
+    /// Synchronous cache load for startup paths that need local models before
+    /// an async runtime is available. Performs file I/O only; no network.
+    pub fn load_blocking(&self) -> Result<DynamicCacheFile, DynamicCacheError> {
+        load_sync(&self.path)
+    }
+
     /// Upserts one provider's entry, preserving all others, and atomically
     /// replaces the cache file.
     ///

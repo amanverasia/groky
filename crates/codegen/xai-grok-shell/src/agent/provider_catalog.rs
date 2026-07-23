@@ -852,7 +852,45 @@ impl ProviderCatalogAdapter {
         self: &Arc<Self>,
         on_event: impl Fn(ProviderCatalogEvent) + Send + Sync + 'static,
     ) {
+        if !self.has_discovery_enabled_dynamic() {
+            return;
+        }
         self.spawn_dynamic_refreshes(false, on_event);
+    }
+
+    /// Whether any registered provider requires background discovery.
+    pub fn has_discovery_enabled_dynamic(&self) -> bool {
+        self.dynamic
+            .lock()
+            .configs
+            .values()
+            .any(|config| config.discover)
+    }
+
+    /// Hydrates applicable last-known-good discovery models from the local
+    /// cache without network I/O. Used during bootstrap before stale refreshes.
+    pub fn hydrate_dynamic_from_cache(&self) {
+        let Ok(cache) = self.dynamic_cache.try_lock() else {
+            return;
+        };
+        let Ok(cache_file) = cache.load_blocking() else {
+            return;
+        };
+        let configs: Vec<_> = self.dynamic.lock().configs.values().cloned().collect();
+        for config in configs {
+            let Some(entry) = cache_file.applicable_provider(&config) else {
+                continue;
+            };
+            let discovered = entry
+                .models
+                .iter()
+                .map(|model| DiscoveredModel {
+                    id: model.id.clone(),
+                    name: model.name.clone(),
+                })
+                .collect();
+            self.publish_dynamic_models(&config, discovered);
+        }
     }
 
     /// Like [`Self::refresh_stale_dynamic_in_background`], but skips the
