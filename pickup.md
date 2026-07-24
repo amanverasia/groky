@@ -27,7 +27,7 @@ Immediate focused branches, in order:
 2. make live `SamplerConfig` non-serializable and add a safe diagnostic view;
 3. finish generic dynamic-provider configuration, composition, reload, cache
    origin scoping, and Janus footer behavior;
-4. remove unused plaintext provider `session_keys`;
+4. unused plaintext provider credential retention removed; credentials are stored/environment-scoped;
 5. selectively adapt reviewed upstream security improvements (web-fetch SSRF,
    plugin Git operands, LSP trust, permission/sensitive-file/endpoint and
    secure-file hardening).

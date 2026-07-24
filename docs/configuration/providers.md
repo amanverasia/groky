@@ -36,13 +36,14 @@ Provider API keys are stored in `$GROK_HOME/auth.json` under a
 
 Credential resolution precedence, at request time:
 
-1. **Session key** — set for the current process only, never persisted.
-2. **Stored key** — the `provider::<id>` entry in `auth.json`.
-3. **Environment variable** — the provider's documented env var(s) from the
+1. **Stored key** — the `provider::<id>` entry in `auth.json`.
+2. **Environment variable** — the provider's documented env var(s) from the
    catalog (e.g. `OPENAI_API_KEY`).
+3. **Explicit model credential** — a model-level `api_key`/`env_key`, retained
+   as the final compatibility fallback.
 
 Dynamic providers may declare ordered environment-variable names as
-secret-free metadata. Their effective order is session > stored > configured
+secret-free metadata. Their effective order is stored > configured
 environment. They never fall back to xAI session credentials or `XAI_API_KEY`.
 For providers marked `unauthenticated` a key is *optional*, not forbidden: if
 a key exists it is sent (discovery, health checks, and inference all follow

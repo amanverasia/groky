@@ -318,7 +318,7 @@ async fn sampler_handoff_carries_key_without_leaking_it() {
     .unwrap();
     config.discover = false;
     adapter.configure_dynamic(config).unwrap();
-    adapter.set_session_key(&provider_id("localgw"), SECRET.to_string());
+    xai_grok_shell::auth::store_provider_api_key(tmp.path(), "localgw", SECRET).unwrap();
 
     // Snapshot layer is secret-free.
     let snapshot = adapter.snapshot();
@@ -329,12 +329,12 @@ async fn sampler_handoff_carries_key_without_leaking_it() {
     let entries = adapter.configured_model_entries(&Config::default());
     let entry = entries
         .get("localgw/gpt-mini")
-        .expect("session-keyed dynamic provider composes its static model");
+        .expect("stored-key dynamic provider composes its static model");
     assert!(entry.api_key.is_none());
     let entry_json = serde_json::to_string(entry).unwrap();
     assert!(!entry_json.contains(SECRET));
 
-    // Credential resolution at the seam injects the key into the sampler
+    // Stored credential resolution at the seam injects the key into the sampler
     // config; base_url and backend flow from the dynamic provider entry.
     let resolved = resolve_credentials_with(
         entry,
@@ -345,7 +345,6 @@ async fn sampler_handoff_carries_key_without_leaking_it() {
                 .credential_for(&ProviderId::new(pid).unwrap())
                 .map(|secret| secret.expose().to_string())
         },
-        |_| None,
     );
     assert_eq!(resolved.api_key.as_deref(), Some(SECRET));
     let sampling = sampling_config_for_model(entry, resolved, None, None, None, None);
@@ -376,7 +375,7 @@ async fn auth_failure_without_fallback_reports_secret_free_guidance() {
     let mut config = dynamic_config("localgw", &format!("{}/v1", server.uri()));
     config.unauthenticated = false;
     adapter.configure_dynamic(config).unwrap();
-    adapter.set_session_key(&provider_id("localgw"), SECRET.to_string());
+    xai_grok_shell::auth::store_provider_api_key(tmp.path(), "localgw", SECRET).unwrap();
 
     let event = adapter
         .refresh_dynamic(&provider_id("localgw"))

@@ -3446,9 +3446,8 @@ pub enum CredentialPolicy {
     /// Current xAI order: model api_key/env_key > session token > XAI_API_KEY.
     #[default]
     XaiLegacy,
-    /// Catalog provider key: session provider key > stored provider key >
-    /// catalog env vars > model api_key/env_key. Never the xAI session token
-    /// or `XAI_API_KEY`.
+    /// Catalog provider key: stored provider key > catalog env vars > model
+    /// api_key/env_key. Never the xAI session token or `XAI_API_KEY`.
     ProviderApiKey,
     /// Model-supplied api_key/env_key only; no fallbacks.
     ExplicitModel,
@@ -3907,7 +3906,6 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
         model,
         session_key,
         || crate::agent::auth_method::read_xai_api_key_env().ok(),
-        |_| None,
         |provider_id| {
             crate::auth::read_provider_api_key(&crate::util::grok_home::grok_home(), provider_id)
         },
@@ -3918,16 +3916,15 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
 ///
 /// - `XaiLegacy`: current behavior, unchanged — model api_key/env_key >
 ///   `session_key` > `xai_env_key()`.
-/// - `ProviderApiKey`: `session_provider_key` > `stored_provider_key` >
-///   catalog provider env vars > model api_key/env_key. The xAI session
-///   token and `XAI_API_KEY` are **never** consulted.
+/// - `ProviderApiKey`: `stored_provider_key` > catalog provider env vars >
+///   model api_key/env_key. The xAI session token and `XAI_API_KEY` are
+///   **never** consulted.
 /// - `ExplicitModel`: model api_key/env_key only; no fallbacks.
 /// - `None`: no key is attached.
 pub fn resolve_credentials_with(
     model: &ModelEntry,
     session_key: Option<&str>,
     xai_env_key: impl FnOnce() -> Option<String>,
-    session_provider_key: impl FnOnce(&str) -> Option<String>,
     stored_provider_key: impl FnOnce(&str) -> Option<String>,
 ) -> ResolvedCredentials {
     let info = model.info();
@@ -3939,13 +3936,7 @@ pub fn resolve_credentials_with(
                 .as_ref()
                 .map(xai_grok_catalog::ProviderId::as_str);
             let (api_key, origin) = provider
-                .and_then(|p| session_provider_key(p).map(|k| (k, "session_provider")))
-                .or_else(|| {
-                    model
-                        .provider_id
-                        .as_ref()
-                        .and_then(|p| stored_provider_key(p.as_str()).map(|k| (k, "stored")))
-                })
+                .and_then(|p| stored_provider_key(p).map(|k| (k, "stored")))
                 .or_else(|| {
                     // Entry env_key (catalog provider env names, including any
                     // `[provider.<id>] env_key` override applied at composition

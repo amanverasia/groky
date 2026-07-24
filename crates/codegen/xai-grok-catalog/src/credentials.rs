@@ -57,8 +57,6 @@ impl fmt::Debug for SecretString {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialOrigin {
-    /// Interactive session-supplied key (highest precedence).
-    Session,
     /// Key stored in `auth.json`.
     Stored,
     /// Key read from a provider environment variable.
@@ -70,8 +68,6 @@ pub enum CredentialOrigin {
 /// Candidate credentials for one provider, one slot per origin.
 #[derive(Debug, Default)]
 pub struct CredentialSources {
-    /// Session-supplied key.
-    pub session: Option<SecretString>,
     /// Key from stored auth.
     pub stored: Option<SecretString>,
     /// Key from the environment.
@@ -90,16 +86,14 @@ pub struct ResolvedCredential {
 }
 
 /// Resolves credential sources with precedence
-/// session > stored > environment > model.
+/// stored > environment > model.
 pub fn resolve_credential(sources: CredentialSources) -> Option<ResolvedCredential> {
     let CredentialSources {
-        session,
         stored,
         environment,
         model,
     } = sources;
     let candidates = [
-        (session, CredentialOrigin::Session),
         (stored, CredentialOrigin::Stored),
         (environment, CredentialOrigin::Environment),
         (model, CredentialOrigin::Model),
@@ -114,7 +108,7 @@ pub fn resolve_credential(sources: CredentialSources) -> Option<ResolvedCredenti
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderAvailability {
-    /// Usable: unauthenticated, or keyed via a session/stored/model credential.
+    /// Usable: unauthenticated, or keyed via a stored/model credential.
     Configured,
     /// Usable via an environment-variable key.
     Environment,
@@ -202,16 +196,15 @@ mod tests {
     }
 
     #[test]
-    fn credential_precedence_is_session_stored_environment_then_model() {
+    fn credential_precedence_is_stored_environment_then_model() {
         let sources = CredentialSources {
-            session: Some(SecretString::new("session")),
             stored: Some(SecretString::new("stored")),
             environment: Some(SecretString::new("env")),
             model: Some(SecretString::new("model")),
         };
         assert_eq!(
             resolve_credential(sources).unwrap().origin,
-            CredentialOrigin::Session
+            CredentialOrigin::Stored
         );
     }
 
